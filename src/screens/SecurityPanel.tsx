@@ -1,13 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { AccessInvitation } from '../types';
 import { db } from '../firebase';
-// Importamos getDoc para buscar el token
 import { collection, query, where, onSnapshot, doc, updateDoc, limit, writeBatch, getDoc } from 'firebase/firestore';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Scanner } from '@yudiel/react-qr-scanner'; 
 
-// --- CLAVE DE API (USADA PARA ENVIAR NOTIFICACIONES) ---
+// --- CLAVE DE API ---
 const FIREBASE_SERVER_KEY = "AIzaSyC8jYuK_-ZTMiUv3_ksmEb0CEra7oqmYiw"; 
 
 interface Props {
@@ -55,7 +54,7 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
     });
   }, []);
 
-  // --- FUNCIÓN DE NOTIFICACIÓN (CON PROXY PARA EVITAR CORS) ---
+  // --- FUNCIÓN DE NOTIFICACIÓN (USANDO CORS-ANYWHERE) ---
   const notifyOwner = async (invitation: AccessInvitation) => {
     try {
       // 1. Buscamos el token del dueño
@@ -69,9 +68,9 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
         if (token) {
           console.log("Intentando enviar notificación a:", userData.name);
           
-          // 2. Enviamos el mensaje USANDO EL PROXY 'corsproxy.io'
-          // Esto evita el error rojo de CORS en el navegador
-          const response = await fetch('https://corsproxy.io/?https://fcm.googleapis.com/fcm/send', {
+          // 2. Enviamos usando 'cors-anywhere' (REQUIERE ACTIVACIÓN MANUAL EN SU WEB)
+          // URL Proxy: https://cors-anywhere.herokuapp.com/
+          const response = await fetch('https://cors-anywhere.herokuapp.com/https://fcm.googleapis.com/fcm/send', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -90,9 +89,17 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
           });
 
           if (response.ok) {
-             console.log("✅ Notificación enviada con éxito (vía Proxy).");
+             console.log("✅ Notificación enviada con éxito.");
           } else {
-             console.error("❌ Error enviando:", await response.text());
+             // Si falla, leemos el error textual
+             const errorText = await response.text();
+             console.error("❌ Error enviando:", errorText);
+             
+             // Si el error dice "Missing necessary header", es porque falta activar el paso 1
+             if(errorText.includes("See /corsdemo")) {
+                alert("⚠️ ERROR DE PROXY:\n\nNecesitas activar el servidor temporalmente.\n\n1. Ve a: https://cors-anywhere.herokuapp.com/corsdemo\n2. Dale al botón 'Request temporary access'\n3. Vuelve aquí e intenta de nuevo.");
+                window.open("https://cors-anywhere.herokuapp.com/corsdemo", "_blank");
+             }
           }
 
         } else {
