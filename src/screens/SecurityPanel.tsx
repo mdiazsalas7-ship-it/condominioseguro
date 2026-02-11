@@ -4,6 +4,7 @@ import { db } from '../firebase';
 import { collection, query, where, onSnapshot, doc, updateDoc, limit, writeBatch } from 'firebase/firestore';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { Scanner } from '@yudiel/react-qr-scanner'; // <--- 1. LIBRERÍA CÁMARA IMPORTADA
 
 interface Props {
   setScreen: (s: string) => void;
@@ -24,8 +25,10 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
   const [manualSearchCedula, setManualSearchCedula] = useState('');
   const [generatingPdf, setGeneratingPdf] = useState(false);
 
+  // ESTADO PARA LA CÁMARA REAL
+  const [isScanning, setIsScanning] = useState(false); // <--- 2. ESTADO CÁMARA
+
   // 1. TIEMPO REAL: ACTIVOS (PENDIENTE / EN SITIO)
-  // Estos NUNCA se borran al imprimir, deben permanecer hasta que salgan.
   useEffect(() => {
     const q = query(
       collection(db, 'access_invitations'),
@@ -33,30 +36,23 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
     );
     return onSnapshot(q, (snapshot) => {
       const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as AccessInvitation[];
-      // Ordenar: Primero los que están ADENTRO
       docs.sort((a, b) => (a.status === 'EN SITIO' ? -1 : 1));
       setActiveInvitations(docs);
     });
   }, []);
 
   // 2. TIEMPO REAL: HISTORIAL DE GUARDIA ACTUAL
-  // Solo mostramos 'SALIDA' que NO haya sido archivada (archived != true)
-  // Esto permite que al imprimir, se marquen como true y desaparezcan de aquí.
   useEffect(() => {
     const qHistory = query(
       collection(db, 'access_invitations'),
       where('status', '==', 'SALIDA'),
-      limit(100) // Límite razonable para una guardia
+      limit(100) 
     );
     
     return onSnapshot(qHistory, (snapshot) => {
       const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as AccessInvitation[];
-      
-      // Filtramos en cliente para asegurar que solo se vean los NO archivados
-      // (Para evitar requerir índices complejos de inmediato en Firebase)
       const currentShiftLogs = docs.filter(doc => !(doc as any).archived);
       
-      // Ordenar por hora de salida (más reciente arriba)
       currentShiftLogs.sort((a, b) => {
          const timeA = a.exitTime || '';
          const timeB = b.exitTime || '';
@@ -67,7 +63,26 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
     });
   }, []);
 
-  // 3. GENERAR REPORTE Y LIMPIAR GUARDIA
+  // --- 3. NUEVA LÓGICA DE ESCANEO (CÁMARA REAL) ---
+  const handleQrScan = (result: string) => {
+    if (result) {
+      // Detener cámara
+      setIsScanning(false);
+      
+      // Buscar en la base de datos local (activeInvitations)
+      const found = activeInvitations.find(inv => inv.id === result);
+      
+      if (found) {
+        setScannedVisitor(found);
+        // Vibración de éxito
+        if (navigator.vibrate) navigator.vibrate(200);
+      } else {
+        alert("⚠️ QR Leído pero NO encontrado en lista activa.\n\nPosibles causas:\n1. La visita ya salió.\n2. El pase expiró.\n3. Código inválido.");
+      }
+    }
+  };
+
+  // 4. GENERAR REPORTE Y LIMPIAR GUARDIA
   const generateDailyReport = async () => {
     if (historyLog.length === 0 && activeInvitations.length === 0) {
       alert("No hay registros para generar reporte.");
@@ -101,7 +116,7 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
       doc.text("REPORTE DE CIERRE DE GUARDIA", 45, 26);
       doc.text(`Fecha: ${today}  |  Cierre: ${timeNow}`, 45, 32);
 
-      // --- DATOS (Incluye activos y cerrados de esta guardia) ---
+      // --- DATOS ---
       const allRecords = [...activeInvitations, ...historyLog];
       
       const tableData = allRecords.map(row => [
@@ -130,7 +145,7 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
       });
 
       // --- FIRMAS ---
-      const finalY = (doc as any).lastAutoTable.finalY + 30; // Usar posición final de tabla
+      const finalY = (doc as any).lastAutoTable.finalY + 30; 
       doc.setLineWidth(0.5);
 
       doc.line(30, finalY, 80, finalY);
@@ -143,22 +158,16 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
 
       doc.save(`Guardia_${today.replace(/\//g, '-')}_${timeNow.replace(/:/g, '')}.pdf`);
 
-      // --- LIMPIEZA DE PANEL (ARCHIVADO) ---
-      // Solo archivamos las que tienen status 'SALIDA' que están en el historial actual
+      // --- LIMPIEZA DE PANEL ---
       if (historyLog.length > 0) {
         const batch = writeBatch(db);
-        
         historyLog.forEach(log => {
-          // Solo marcamos como archivadas las que ya salieron
           if (log.status === 'SALIDA') {
             const ref = doc(db, 'access_invitations', log.id);
             batch.update(ref, { archived: true });
           }
         });
-
         await batch.commit();
-        // Al hacer commit, el listener 'onSnapshot' de useEffect detectará el cambio
-        // y como filtramos (!doc.archived), desaparecerán visualmente de la lista.
       }
 
     } catch (error) {
@@ -171,16 +180,8 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
 
   // --- CONTROL DE ACCESOS ---
   const handleScan = () => {
-    const qrCode = prompt("SIMULADOR ESCÁNER:\nIngrese ID del QR:");
-    if (!qrCode) return;
-    const found = activeInvitations.find(inv => inv.id === qrCode);
-    
-    if (found) {
-      setScannedVisitor(found);
-    } else {
-      // Buscar si ya salió (para informar)
-      alert("❌ Invitación no encontrada en lista activa.\nPuede que ya haya registrado su salida o sea inválida.");
-    }
+    // Activamos la cámara real
+    setIsScanning(true);
   };
 
   const handleManualSearch = () => {
@@ -203,6 +204,43 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
       setScannedVisitor(null);
     } catch (e) { alert("Error al registrar"); }
   };
+
+  // --- RENDERIZADO DE PANTALLA COMPLETA DE CÁMARA ---
+  if (isScanning) {
+    return (
+      <div className="fixed inset-0 z-[100] bg-black flex flex-col items-center justify-center">
+        <div className="w-full max-w-md aspect-square relative rounded-3xl overflow-hidden border-4 border-blue-500 shadow-2xl bg-black">
+          <Scanner 
+            onResult={(text) => handleQrScan(text)} 
+            onError={(error) => console.log(error?.message)}
+            options={{
+                delayBetweenScanAttempts: 300,
+                constraints: { facingMode: 'environment' } // Cámara Trasera
+            }}
+          />
+          
+          {/* Overlay Visual de Escaneo */}
+          <div className="absolute inset-0 border-[50px] border-black/50 pointer-events-none flex items-center justify-center">
+            <div className="size-60 border-2 border-white/50 rounded-xl relative">
+                <div className="absolute top-0 left-0 w-4 h-4 border-t-4 border-l-4 border-blue-500 -mt-1 -ml-1"></div>
+                <div className="absolute top-0 right-0 w-4 h-4 border-t-4 border-r-4 border-blue-500 -mt-1 -mr-1"></div>
+                <div className="absolute bottom-0 left-0 w-4 h-4 border-b-4 border-l-4 border-blue-500 -mb-1 -ml-1"></div>
+                <div className="absolute bottom-0 right-0 w-4 h-4 border-b-4 border-r-4 border-blue-500 -mb-1 -mr-1"></div>
+            </div>
+          </div>
+        </div>
+        
+        <p className="text-white mt-6 font-bold uppercase tracking-widest text-sm animate-pulse">Apunte al Código QR</p>
+        
+        <button 
+          onClick={() => setIsScanning(false)}
+          className="mt-8 bg-red-600 text-white px-8 py-4 rounded-full font-black uppercase tracking-widest shadow-lg active:scale-95"
+        >
+          Cancelar Escaneo
+        </button>
+      </div>
+    );
+  }
 
   const morosos = [
     { unit: '102-A', resident: 'Pedro Gomez', debt: '$150.00', status: 'Restringido' },
@@ -234,7 +272,7 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
           <>
             {!scannedVisitor && !isManualEntry && (
               <div className="grid grid-cols-2 gap-4">
-                <button onClick={handleScan} className="bg-blue-600 hover:bg-blue-500 p-6 rounded-3xl shadow-xl flex flex-col items-center gap-2 active:scale-95"><span className="material-symbols-outlined text-4xl">qr_code_scanner</span><span className="text-xs font-black uppercase">Escanear</span></button>
+                <button onClick={handleScan} className="bg-blue-600 hover:bg-blue-500 p-6 rounded-3xl shadow-xl flex flex-col items-center gap-2 active:scale-95"><span className="material-symbols-outlined text-4xl">qr_code_scanner</span><span className="text-xs font-black uppercase">Escanear QR</span></button>
                 <button onClick={() => setIsManualEntry(true)} className="bg-slate-800 hover:bg-slate-700 p-6 rounded-3xl border border-slate-700 flex flex-col items-center gap-2 active:scale-95"><span className="material-symbols-outlined text-4xl text-slate-400">search</span><span className="text-xs font-black uppercase text-slate-400">Cédula</span></button>
               </div>
             )}
@@ -278,7 +316,7 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
           </>
         )}
 
-        {/* TAB 2: HISTORIAL (SOLO NO ARCHIVADOS) */}
+        {/* TAB 2: HISTORIAL */}
         {activeTab === 'historial' && (
           <section className="space-y-4 animate-in fade-in slide-in-from-right-4">
             <div className="flex justify-between items-center bg-slate-800 p-3 rounded-2xl border border-slate-700">
