@@ -19,7 +19,8 @@ import FaultReport from './screens/FaultReport';
 import Conciliation from './screens/Conciliation';
 
 // Si tienes firebase configurado:
-import { auth, db } from './firebase';
+// --- MODIFICACIÓN 1: AGREGAMOS LAS FUNCIONES DE NOTIFICACIÓN AL IMPORT ---
+import { auth, db, requestNotificationPermission, onForegroundMessage } from './firebase';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 
@@ -56,6 +57,11 @@ const App: React.FC = () => {
 
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
+        // --- MODIFICACIÓN 2: ACTIVAMOS NOTIFICACIONES AL DETECTAR USUARIO ---
+        requestNotificationPermission(user.uid);
+        onForegroundMessage();
+        // -------------------------------------------------------------------
+
         try {
           const userDoc = await getDoc(doc(db, 'users', user.uid));
           if (userDoc.exists()) {
@@ -143,7 +149,7 @@ const App: React.FC = () => {
       case 'surveys': return <Surveys setScreen={setScreen} role={role} />;
       
       case 'receipt-detail': return <ReceiptDetail setScreen={setScreen} />;
-      case 'report-payment': return <ReportPayment setScreen={setScreen} />;
+      case 'report-payment': return <Reportpayment setScreen={setScreen} />;
       case 'access-control': return <AccessControl setScreen={setScreen} />;
       case 'fault-report': return <FaultReport setScreen={setScreen} />;
 
