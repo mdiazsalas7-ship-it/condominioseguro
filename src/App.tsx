@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-// IMPORTACIONES (Nombres corregidos para que coincidan con tus archivos reales)
+
+// TUS PANTALLAS (Asegúrate que los imports coincidan con tus nombres de archivo)
 import Login from './screens/Login';
 import Register from './screens/Register';
 import ResidentDashboard from './screens/ResidentDashboard';
@@ -18,13 +19,12 @@ import AccessControl from './screens/AccessControl';
 import FaultReport from './screens/FaultReport';
 import Conciliation from './screens/Conciliation';
 
-// Si tienes firebase configurado:
-// --- MODIFICACIÓN 1: AGREGAMOS LAS FUNCIONES DE NOTIFICACIÓN AL IMPORT ---
-import { auth, db, requestNotificationPermission, onForegroundMessage } from './firebase';
+// FIREBASE
+import { auth, db } from './firebase';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
+import { doc, getDoc, collection, query, where, onSnapshot } from 'firebase/firestore';
 
-// Definición de Roles y Tipos
+// ROLES Y TIPOS
 export enum UserRole {
   ADMIN = 'ADMIN',
   RESIDENT = 'RESIDENT',
@@ -48,19 +48,16 @@ const App: React.FC = () => {
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [screen, setScreen] = useState<string>('login');
 
+  // 1. CONTROL DE SESIÓN
   useEffect(() => {
-    // Verificamos si auth existe para evitar crash si no hay firebase
-    if (!auth) {
-      setLoading(false);
-      return;
-    }
+    if (!auth) { setLoading(false); return; }
 
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
-        // --- MODIFICACIÓN 2: ACTIVAMOS NOTIFICACIONES AL DETECTAR USUARIO ---
-        requestNotificationPermission(user.uid);
-        onForegroundMessage();
-        // -------------------------------------------------------------------
+        // Pedimos permiso de notificación al entrar
+        if ('Notification' in window && Notification.permission === 'default') {
+          Notification.requestPermission();
+        }
 
         try {
           const userDoc = await getDoc(doc(db, 'users', user.uid));
@@ -76,9 +73,9 @@ const App: React.FC = () => {
               phone: data.phone,
               photoURL: data.photoURL
             });
+            setIsAuthenticated(true);
+            setScreen('dashboard');
           }
-          setIsAuthenticated(true);
-          setScreen('dashboard');
         } catch (error) {
           console.error("Error cargando perfil:", error);
         }
@@ -94,35 +91,69 @@ const App: React.FC = () => {
     return () => unsubscribe();
   }, []);
 
+  // --- 🔥 EL RADAR DE VISITAS (NOTIFICACIÓN LOCAL) 🔥 ---
+  useEffect(() => {
+    // Solo activamos si el usuario es residente
+    if (!userProfile || !userProfile.uid || userProfile.role !== UserRole.RESIDENT) return;
+
+    // Escuchamos mis invitaciones que estén 'EN SITIO'
+    const q = query(
+      collection(db, 'access_invitations'), 
+      where('author', '==', userProfile.uid),
+      where('status', '==', 'EN SITIO')
+    );
+
+    const unsubscribeRadar = onSnapshot(q, (snapshot) => {
+      snapshot.docChanges().forEach((change) => {
+        // Si el documento fue "añadido" a esta consulta o "modificado"
+        // significa que alguien acaba de entrar.
+        if (change.type === 'added' || change.type === 'modified') {
+           const data = change.doc.data();
+           
+           // Evitar notificar si la entrada fue hace mucho (opcional, aquí notificamos por simplicidad)
+           // Lanzar notificación nativa
+           if (Notification.permission === 'granted') {
+             try {
+               // 1. Vibración
+               if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+               
+               // 2. Notificación Visual
+               new Notification("🔔 ¡LLEGÓ TU VISITA!", {
+                 body: `${data.name} (${data.type}) acaba de ingresar a la urbanización.`,
+                 icon: '/logo192.png', // Asegúrate de tener este icono en public
+                 vibrate: [200, 100, 200]
+               });
+
+               // 3. Audio (Opcional, puede ser bloqueado por el navegador si no hubo interacción previa)
+               const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+               audio.play().catch(e => console.log("Audio autoplay bloqueado"));
+
+             } catch (e) { console.log("Error notificación local:", e); }
+           }
+        }
+      });
+    });
+
+    return () => unsubscribeRadar();
+  }, [userProfile]); // Se reinicia si cambia el usuario
+
   const handleLogout = async () => {
-    try {
-      if (auth?.currentUser) await signOut(auth);
-    } catch (e) {
-      console.log("Salida local");
-    } finally {
-      setIsAuthenticated(false);
-      setUserProfile(null);
-      setScreen('login');
-    }
+    try { if (auth?.currentUser) await signOut(auth); } catch (e) { console.log(e); }
+    setIsAuthenticated(false);
+    setUserProfile(null);
+    setScreen('login');
   };
 
   const handleDemoLogin = (role: 'ADMIN' | 'RESIDENT' | 'SECURITY') => {
-    const roleMapping = { 
-      ADMIN: UserRole.ADMIN, 
-      RESIDENT: UserRole.RESIDENT, 
-      SECURITY: UserRole.SECURITY 
-    };
-    
+    // Tu lógica de demo existente...
+    const roleMapping = { ADMIN: UserRole.ADMIN, RESIDENT: UserRole.RESIDENT, SECURITY: UserRole.SECURITY };
     setUserProfile({
       uid: `demo-${role.toLowerCase()}`,
       name: role === 'ADMIN' ? 'Carlos Admin' : role === 'SECURITY' ? 'Oficial Martinez' : 'Vecino Juan',
       email: `${role.toLowerCase()}@demo.com`,
       role: roleMapping[role],
       unit: role === 'RESIDENT' ? 'Torre A' : undefined,
-      apt: role === 'RESIDENT' ? '102' : undefined,
-      photoURL: undefined
     });
-    
     setIsAuthenticated(true);
     setScreen('dashboard');
   };
@@ -175,12 +206,10 @@ const App: React.FC = () => {
               <span className="material-symbols-outlined text-2xl">grid_view</span>
               <span className="text-[9px] font-bold uppercase mt-1">Inicio</span>
             </button>
-            
             <button onClick={() => setScreen('announcements')} className={`flex flex-col items-center flex-1 ${screen === 'announcements' ? 'text-blue-600' : 'text-slate-400'}`}>
               <span className="material-symbols-outlined text-2xl">campaign</span>
               <span className="text-[9px] font-bold uppercase mt-1">Avisos</span>
             </button>
-
             <button onClick={() => setScreen('profile-edit')} className={`flex flex-col items-center flex-1 ${screen === 'profile-edit' ? 'text-blue-600' : 'text-slate-400'}`}>
               <span className="material-symbols-outlined text-2xl">person</span>
               <span className="text-[9px] font-bold uppercase mt-1">Perfil</span>

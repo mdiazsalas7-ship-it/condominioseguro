@@ -1,13 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { AccessInvitation } from '../types';
+import { AccessInvitation } from '../types'; // Asegúrate que este tipo exista o defínelo aquí si da error
 import { db } from '../firebase';
-import { collection, query, where, onSnapshot, doc, updateDoc, limit, writeBatch, getDoc } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, doc, updateDoc, limit, writeBatch } from 'firebase/firestore';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Scanner } from '@yudiel/react-qr-scanner'; 
-
-// --- CLAVE DE API ---
-const FIREBASE_SERVER_KEY = "AIzaSyC8jYuK_-ZTMiUv3_ksmEb0CEra7oqmYiw"; 
 
 interface Props {
   setScreen: (s: string) => void;
@@ -17,11 +14,11 @@ interface Props {
 const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
   const [activeTab, setActiveTab] = useState<'control' | 'historial' | 'morosidad'>('control');
   
-  // Listas de datos
+  // Estados de datos
   const [activeInvitations, setActiveInvitations] = useState<AccessInvitation[]>([]); 
   const [historyLog, setHistoryLog] = useState<AccessInvitation[]>([]); 
   
-  // Modales y Estados
+  // Estados de UI
   const [scannedVisitor, setScannedVisitor] = useState<AccessInvitation | null>(null);
   const [selectedLog, setSelectedLog] = useState<AccessInvitation | null>(null);
   const [isManualEntry, setIsManualEntry] = useState(false);
@@ -29,19 +26,20 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
   const [generatingPdf, setGeneratingPdf] = useState(false);
   const [isScanning, setIsScanning] = useState(false); 
 
-  // 1. TIEMPO REAL: ACTIVOS
+  // 1. CARGAR INVITACIONES ACTIVAS (Pendientes y En Sitio)
   useEffect(() => {
     const q = query(collection(db, 'access_invitations'), where('status', 'in', ['PENDIENTE', 'EN SITIO']));
     return onSnapshot(q, (snapshot) => {
       const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as AccessInvitation[];
+      // Ordenar: Los que están "EN SITIO" primero
       docs.sort((a, b) => (a.status === 'EN SITIO' ? -1 : 1));
       setActiveInvitations(docs);
     });
   }, []);
 
-  // 2. TIEMPO REAL: HISTORIAL
+  // 2. CARGAR HISTORIAL (Salidas recientes)
   useEffect(() => {
-    const qHistory = query(collection(db, 'access_invitations'), where('status', '==', 'SALIDA'), limit(100));
+    const qHistory = query(collection(db, 'access_invitations'), where('status', '==', 'SALIDA'), limit(50));
     return onSnapshot(qHistory, (snapshot) => {
       const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as AccessInvitation[];
       const currentShiftLogs = docs.filter(doc => !(doc as any).archived);
@@ -54,88 +52,48 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
     });
   }, []);
 
-  // --- FUNCIÓN DE NOTIFICACIÓN (USANDO CORS-ANYWHERE) ---
-  const notifyOwner = async (invitation: AccessInvitation) => {
-    try {
-      // 1. Buscamos el token del dueño
-      const userRef = doc(db, 'users', invitation.author);
-      const userSnap = await getDoc(userRef);
-      
-      if (userSnap.exists()) {
-        const userData = userSnap.data();
-        const token = userData.fcmToken;
-
-        if (token) {
-          console.log("Intentando enviar notificación a:", userData.name);
-          
-          // 2. Enviamos usando 'cors-anywhere' (REQUIERE ACTIVACIÓN MANUAL EN SU WEB)
-          // URL Proxy: https://cors-anywhere.herokuapp.com/
-          const response = await fetch('https://cors-anywhere.herokuapp.com/https://fcm.googleapis.com/fcm/send', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `key=${FIREBASE_SERVER_KEY}`
-            },
-            body: JSON.stringify({
-              to: token,
-              notification: {
-                title: '🔔 Visita Llegando',
-                body: `${invitation.name} (${invitation.type}) ha ingresado al condominio.`
-              },
-              data: {
-                click_action: "FLUTTER_NOTIFICATION_CLICK"
-              }
-            })
-          });
-
-          if (response.ok) {
-             console.log("✅ Notificación enviada con éxito.");
-          } else {
-             // Si falla, leemos el error textual
-             const errorText = await response.text();
-             console.error("❌ Error enviando:", errorText);
-             
-             // Si el error dice "Missing necessary header", es porque falta activar el paso 1
-             if(errorText.includes("See /corsdemo")) {
-                alert("⚠️ ERROR DE PROXY:\n\nNecesitas activar el servidor temporalmente.\n\n1. Ve a: https://cors-anywhere.herokuapp.com/corsdemo\n2. Dale al botón 'Request temporary access'\n3. Vuelve aquí e intenta de nuevo.");
-                window.open("https://cors-anywhere.herokuapp.com/corsdemo", "_blank");
-             }
-          }
-
-        } else {
-          console.log("⚠️ El usuario no tiene token FCM activo.");
-        }
-      }
-    } catch (error) {
-      console.error("Error general de notificación:", error);
-    }
-  };
-
-  // --- LÓGICA DE ESCANEO ---
+  // 3. LÓGICA DE ESCANEO
   const handleQrScan = (detectedCodes: any) => {
     if (detectedCodes && detectedCodes.length > 0) {
       const rawValue = detectedCodes[0].rawValue; 
-      
       if (rawValue) {
         setIsScanning(false);
         const found = activeInvitations.find(inv => inv.id === rawValue);
-        
         if (found) {
           if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
           setScannedVisitor(found);
         } else {
           if (navigator.vibrate) navigator.vibrate(500);
-          alert("❌ CÓDIGO NO VÁLIDO.\n\nEste pase no existe en la lista activa, ya salió o es falso.");
+          alert("❌ PASE NO VÁLIDO O YA PROCESADO");
           setIsScanning(false);
         }
       }
     }
   };
 
-  // GENERAR REPORTE
+  // 4. PROCESAR ACCESO (Solo actualiza DB)
+  const processAccess = async (visitor: AccessInvitation, action: 'ENTRAR' | 'SALIR') => {
+    try {
+      const docRef = doc(db, 'access_invitations', visitor.id);
+      const now = new Date().toLocaleTimeString('es-VE', { hour: '2-digit', minute: '2-digit', hour12: true });
+      
+      await updateDoc(docRef, { 
+        status: action === 'ENTRAR' ? 'EN SITIO' : 'SALIDA', 
+        [action === 'ENTRAR' ? 'entryTime' : 'exitTime']: now 
+      });
+
+      // Feedback visual simple
+      setScannedVisitor(null);
+    } catch (e) { 
+      alert("Error de conexión");
+      console.error(e);
+    }
+  };
+
+  // 5. GENERAR REPORTE PDF
   const generateDailyReport = async () => {
-    if (historyLog.length === 0 && activeInvitations.length === 0) return alert("No hay registros.");
-    if (!confirm("¿Generar Reporte y CERRAR GUARDIA?\nEsto archivará las visitas del historial.")) return;
+    if (historyLog.length === 0 && activeInvitations.length === 0) return alert("No hay registros para cerrar.");
+    if (!confirm("¿Generar Reporte y CERRAR GUARDIA?")) return;
 
     setGeneratingPdf(true);
     try {
@@ -145,36 +103,26 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
 
       doc.setFillColor(30, 58, 138); doc.rect(14, 10, 25, 25, 'F'); 
       doc.setTextColor(255, 255, 255); doc.setFontSize(16); doc.text("CS", 19, 27); 
-
       doc.setTextColor(0, 0, 0); doc.setFont("helvetica", "bold"); doc.setFontSize(16);
-      doc.text("URBANIZACIÓN CONDOMINIO SEGURO", 45, 20);
+      doc.text("CONDOMINIO SEGURO", 45, 20);
       doc.setFont("helvetica", "normal"); doc.setFontSize(10);
-      doc.text("REPORTE DE CIERRE DE GUARDIA", 45, 26);
-      doc.text(`Fecha: ${today}  |  Cierre: ${timeNow}`, 45, 32);
+      doc.text(`REPORTE DE GUARDIA - ${today} ${timeNow}`, 45, 26);
 
       const allRecords = [...activeInvitations, ...historyLog];
       const tableData = allRecords.map(row => [
-        row.entryTime || '--:--', row.exitTime || (row.status === 'EN SITIO' ? 'En Sitio' : 'Pendiente'),
-        row.unit, row.name, row.idNumber,
-        row.type === 'Delivery' ? `Delivery (${row.deliveryCompany})` : `Visitante ${row.vehiclePlate ? `(${row.vehiclePlate})` : ''}`,
-        row.status
+        row.entryTime || '--', row.exitTime || (row.status === 'EN SITIO' ? 'Dentro' : 'Pendiente'),
+        row.unit, row.name, row.idNumber, row.type, row.status
       ]);
 
       autoTable(doc, {
-        startY: 45,
-        head: [['Entrada', 'Salida', 'Destino', 'Nombre', 'Cédula', 'Detalle', 'Estado']],
+        startY: 35,
+        head: [['Entrada', 'Salida', 'Apto', 'Nombre', 'Cédula', 'Tipo', 'Estado']],
         body: tableData,
-        theme: 'grid',
-        headStyles: { fillColor: [30, 58, 138], halign: 'center', fontSize: 8 },
-        styles: { fontSize: 7, cellPadding: 2 }
       });
-
-      const finalY = (doc as any).lastAutoTable.finalY + 30;
-      doc.line(30, finalY, 80, finalY); doc.text("ENTREGA GUARDIA", 55, finalY + 5, { align: 'center' });
-      doc.line(130, finalY, 180, finalY); doc.text("RECIBE GUARDIA", 155, finalY + 5, { align: 'center' });
 
       doc.save(`Guardia_${today.replace(/\//g, '-')}.pdf`);
 
+      // Archivar salidas
       if (historyLog.length > 0) {
         const batch = writeBatch(db);
         historyLog.forEach(log => {
@@ -182,52 +130,18 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
         });
         await batch.commit();
       }
-    } catch (e) { alert("Error reporte"); } finally { setGeneratingPdf(false); }
-  };
-
-  const processAccess = async (visitor: AccessInvitation, action: 'ENTRAR' | 'SALIR') => {
-    try {
-      const docRef = doc(db, 'access_invitations', visitor.id);
-      const now = new Date().toLocaleTimeString('es-VE', { hour: '2-digit', minute: '2-digit', hour12: true });
-      await updateDoc(docRef, { 
-        status: action === 'ENTRAR' ? 'EN SITIO' : 'SALIDA', 
-        [action === 'ENTRAR' ? 'entryTime' : 'exitTime']: now 
-      });
-
-      // 🔥 SI ESTÁ ENTRANDO, DISPARAMOS LA NOTIFICACIÓN
-      if (action === 'ENTRAR') {
-        notifyOwner(visitor);
-      }
-
-      setScannedVisitor(null);
-    } catch (e) { alert("Error conexión"); }
+    } catch (e) { alert("Error PDF"); } finally { setGeneratingPdf(false); }
   };
 
   // --- RENDERIZADO ---
-  if (isScanning) {
-    return (
-      <div className="fixed inset-0 z-[100] bg-black flex flex-col items-center justify-center">
-        <div className="w-full max-w-md aspect-square relative rounded-3xl overflow-hidden border-4 border-blue-500 shadow-2xl bg-black">
-          <Scanner 
-            onScan={(result) => handleQrScan(result)}
-            onError={(error) => console.log(error?.message)}
-            components={{ audio: false, torch: true }}
-            styles={{ container: { width: '100%', height: '100%' } }}
-          />
-          <div className="absolute inset-0 border-[50px] border-black/50 pointer-events-none flex items-center justify-center">
-            <div className="size-60 border-2 border-white/50 rounded-xl relative">
-                <div className="absolute top-0 left-0 w-6 h-6 border-t-4 border-l-4 border-green-500 -mt-1 -ml-1"></div>
-                <div className="absolute top-0 right-0 w-6 h-6 border-t-4 border-r-4 border-green-500 -mt-1 -mr-1"></div>
-                <div className="absolute bottom-0 left-0 w-6 h-6 border-b-4 border-l-4 border-green-500 -mb-1 -ml-1"></div>
-                <div className="absolute bottom-0 right-0 w-6 h-6 border-b-4 border-r-4 border-green-500 -mb-1 -mr-1"></div>
-            </div>
-          </div>
-        </div>
-        <p className="text-white mt-6 font-bold uppercase tracking-widest text-sm animate-pulse">Buscando Código...</p>
-        <button onClick={() => setIsScanning(false)} className="mt-8 bg-red-600 text-white px-8 py-3 rounded-full font-black uppercase tracking-widest shadow-lg">Cerrar Cámara</button>
+  if (isScanning) return (
+    <div className="fixed inset-0 z-[100] bg-black flex flex-col items-center justify-center">
+      <div className="w-full max-w-md aspect-square relative rounded-3xl overflow-hidden border-4 border-blue-500 shadow-2xl bg-black">
+        <Scanner onScan={handleQrScan} components={{ audio: false, torch: true }} styles={{ container: { width: '100%', height: '100%' } }} />
       </div>
-    );
-  }
+      <button onClick={() => setIsScanning(false)} className="mt-8 bg-red-600 text-white px-8 py-3 rounded-full font-black uppercase">Cerrar Cámara</button>
+    </div>
+  );
 
   const morosos = [{ unit: '102-A', resident: 'Pedro Gomez', debt: '$150.00', status: 'Restringido' }];
 
@@ -237,73 +151,57 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
         <div className="flex justify-between items-center mb-4">
           <div className="flex items-center gap-3">
             <div className="size-10 bg-blue-600 rounded-xl flex items-center justify-center shadow-lg"><span className="material-symbols-outlined text-white">security</span></div>
-            <div><h1 className="text-sm font-black uppercase tracking-widest">Garita Principal</h1><p className="text-[10px] font-bold text-blue-400">Control de Acceso</p></div>
+            <div><h1 className="text-sm font-black uppercase tracking-widest">Garita</h1><p className="text-[10px] font-bold text-blue-400">Control</p></div>
           </div>
           <button onClick={onLogout} className="size-10 rounded-full bg-slate-700 flex items-center justify-center hover:bg-red-500/20 hover:text-red-400"><span className="material-symbols-outlined">logout</span></button>
         </div>
         <div className="flex bg-slate-900 p-1 rounded-xl border border-slate-700">
-          <button onClick={() => setActiveTab('control')} className={`flex-1 py-2 text-[10px] font-black uppercase rounded-lg transition-all ${activeTab === 'control' ? 'bg-blue-600 text-white' : 'text-slate-500 hover:text-white'}`}>Accesos ({activeInvitations.length})</button>
-          <button onClick={() => setActiveTab('historial')} className={`flex-1 py-2 text-[10px] font-black uppercase rounded-lg transition-all ${activeTab === 'historial' ? 'bg-slate-600 text-white' : 'text-slate-500 hover:text-white'}`}>Historial ({historyLog.length})</button>
-          <button onClick={() => setActiveTab('morosidad')} className={`flex-1 py-2 text-[10px] font-black uppercase rounded-lg transition-all ${activeTab === 'morosidad' ? 'bg-red-600 text-white' : 'text-slate-500 hover:text-white'}`}>Morosidad</button>
+          <button onClick={() => setActiveTab('control')} className={`flex-1 py-2 text-[10px] font-black uppercase rounded-lg ${activeTab === 'control' ? 'bg-blue-600' : 'text-slate-500'}`}>Accesos</button>
+          <button onClick={() => setActiveTab('historial')} className={`flex-1 py-2 text-[10px] font-black uppercase rounded-lg ${activeTab === 'historial' ? 'bg-slate-600' : 'text-slate-500'}`}>Historial</button>
+          <button onClick={() => setActiveTab('morosidad')} className={`flex-1 py-2 text-[10px] font-black uppercase rounded-lg ${activeTab === 'morosidad' ? 'bg-red-600' : 'text-slate-500'}`}>Morosidad</button>
         </div>
       </header>
 
       <main className="p-4 space-y-6">
-        
-        {/* TAB 1: CONTROL */}
         {activeTab === 'control' && (
           <>
             {!scannedVisitor && !isManualEntry && (
               <div className="grid grid-cols-2 gap-4">
-                <button onClick={() => setIsScanning(true)} className="bg-blue-600 hover:bg-blue-500 p-6 rounded-3xl shadow-xl flex flex-col items-center gap-2 active:scale-95"><span className="material-symbols-outlined text-4xl">qr_code_scanner</span><span className="text-xs font-black uppercase">Escanear</span></button>
-                <button onClick={() => setIsManualEntry(true)} className="bg-slate-800 hover:bg-slate-700 p-6 rounded-3xl border border-slate-700 flex flex-col items-center gap-2 active:scale-95"><span className="material-symbols-outlined text-4xl text-slate-400">search</span><span className="text-xs font-black uppercase text-slate-400">Cédula</span></button>
+                <button onClick={() => setIsScanning(true)} className="bg-blue-600 p-6 rounded-3xl flex flex-col items-center gap-2 shadow-lg"><span className="material-symbols-outlined text-4xl">qr_code_scanner</span><span className="text-xs font-black uppercase">Escanear</span></button>
+                <button onClick={() => setIsManualEntry(true)} className="bg-slate-800 p-6 rounded-3xl border border-slate-700 flex flex-col items-center gap-2"><span className="material-symbols-outlined text-4xl text-slate-400">search</span><span className="text-xs font-black uppercase text-slate-400">Cédula</span></button>
               </div>
             )}
             
             {isManualEntry && (
-              <div className="bg-slate-800 p-4 rounded-2xl border border-slate-700 animate-in zoom-in-95">
+              <div className="bg-slate-800 p-4 rounded-2xl border border-slate-700">
                 <input value={manualSearchCedula} onChange={e => setManualSearchCedula(e.target.value)} className="w-full bg-slate-900 border-none rounded-xl h-12 px-4 text-white font-bold mb-3" placeholder="Cédula..." />
                 <div className="flex gap-2">
                   <button onClick={() => setIsManualEntry(false)} className="flex-1 bg-slate-700 h-10 rounded-lg text-xs font-bold uppercase">Cancelar</button>
                   <button onClick={() => {
                     const found = activeInvitations.find(inv => inv.idNumber.includes(manualSearchCedula));
-                    if (found) { setScannedVisitor(found); setIsManualEntry(false); setManualSearchCedula(''); } 
-                    else alert("❌ No encontrada.");
+                    if (found) { setScannedVisitor(found); setIsManualEntry(false); setManualSearchCedula(''); } else alert("❌ No encontrada.");
                   }} className="flex-1 bg-blue-600 h-10 rounded-lg text-xs font-bold uppercase">Buscar</button>
                 </div>
               </div>
             )}
 
-            {/* MODAL VISITANTE ENCONTRADO */}
             {scannedVisitor && (
-              <div className="bg-slate-800 border-2 border-green-500 rounded-3xl p-6 shadow-2xl animate-in zoom-in-95 relative overflow-hidden">
-                 <div className="absolute top-0 left-0 right-0 bg-green-500 py-1 text-center">
-                    <p className="text-[10px] font-black text-white uppercase tracking-[0.2em]">✅ Pase Válido / Legal</p>
+              <div className="bg-slate-800 border-2 border-green-500 rounded-3xl p-6 shadow-2xl relative overflow-hidden animate-in zoom-in-95">
+                 <div className="absolute top-0 left-0 right-0 bg-green-500 py-1 text-center"><p className="text-[10px] font-black text-white uppercase tracking-[0.2em]">✅ Pase Válido</p></div>
+                 <div className="mt-6 mb-4">
+                    <p className="text-[10px] text-slate-400 uppercase font-bold">{scannedVisitor.type}</p>
+                    <h2 className="text-2xl font-black text-white">{scannedVisitor.name}</h2>
+                    <p className="text-sm text-yellow-500 font-bold">Apto: {scannedVisitor.unit}</p>
                  </div>
-                 <div className="flex justify-between items-start mb-4 mt-4">
-                    <div>
-                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">{scannedVisitor.type}</p>
-                      <h2 className="text-2xl font-black text-white leading-none">{scannedVisitor.name}</h2>
-                      {scannedVisitor.deliveryCompany && <span className="inline-block mt-2 bg-orange-500/20 text-orange-400 text-[10px] font-black uppercase px-2 py-1 rounded">{scannedVisitor.deliveryCompany}</span>}
-                    </div>
-                    <button onClick={() => setScannedVisitor(null)} className="size-8 rounded-full bg-slate-700 flex items-center justify-center"><span className="material-symbols-outlined text-sm">close</span></button>
-                 </div>
-                 <div className="bg-slate-900/50 p-4 rounded-xl space-y-2 mb-6">
-                    <p className="flex justify-between text-xs"><span className="text-slate-400">Destino:</span> <strong className="text-yellow-400">{scannedVisitor.unit}</strong></p>
-                    <p className="flex justify-between text-xs"><span className="text-slate-400">Cédula:</span> <strong>{scannedVisitor.idNumber}</strong></p>
-                    <p className="flex justify-between text-xs"><span className="text-slate-400">Placa:</span> <strong>{scannedVisitor.vehiclePlate}</strong></p>
-                 </div>
-                 <button onClick={() => processAccess(scannedVisitor, scannedVisitor.status === 'PENDIENTE' ? 'ENTRAR' : 'SALIR')} className={`w-full h-14 rounded-2xl font-black uppercase tracking-widest shadow-lg flex items-center justify-center gap-2 ${scannedVisitor.status === 'PENDIENTE' ? 'bg-green-500 hover:bg-green-600' : 'bg-red-500 hover:bg-red-600'}`}>
-                   <span className="material-symbols-outlined">{scannedVisitor.status === 'PENDIENTE' ? 'login' : 'logout'}</span>
+                 <button onClick={() => processAccess(scannedVisitor, scannedVisitor.status === 'PENDIENTE' ? 'ENTRAR' : 'SALIR')} className={`w-full h-14 rounded-2xl font-black uppercase shadow-lg flex items-center justify-center gap-2 ${scannedVisitor.status === 'PENDIENTE' ? 'bg-green-500' : 'bg-red-500'}`}>
                    {scannedVisitor.status === 'PENDIENTE' ? 'APROBAR ENTRADA' : 'REGISTRAR SALIDA'}
                  </button>
+                 <button onClick={() => setScannedVisitor(null)} className="w-full mt-4 text-xs text-slate-500 font-bold uppercase">Cancelar</button>
               </div>
             )}
 
             <div className="space-y-3 pt-4">
-              <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">En Garita / Pendientes</h3>
-              {activeInvitations.length === 0 && <p className="text-xs text-slate-500 text-center py-4">No hay visitas activas.</p>}
-              {activeInvitations.map(inv => (
+               {activeInvitations.map(inv => (
                 <div key={inv.id} onClick={() => setScannedVisitor(inv)} className={`p-4 rounded-2xl border flex justify-between items-center cursor-pointer ${inv.status === 'EN SITIO' ? 'bg-green-500/10 border-green-500/30' : 'bg-slate-800 border-slate-700'}`}>
                   <div><h4 className="font-bold text-sm text-white">{inv.name}</h4><p className="text-[10px] text-slate-400 uppercase font-bold">{inv.unit} • {inv.type}</p></div>
                   {inv.status === 'EN SITIO' ? <span className="text-[9px] font-black bg-green-500 text-white px-2 py-0.5 rounded uppercase">Adentro</span> : <span className="text-[9px] font-black border border-slate-600 text-slate-500 px-2 py-0.5 rounded uppercase">Pendiente</span>}
@@ -313,54 +211,24 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
           </>
         )}
 
-        {/* TAB 2: HISTORIAL */}
         {activeTab === 'historial' && (
-          <section className="space-y-4 animate-in fade-in slide-in-from-right-4">
-            <div className="flex justify-between items-center bg-slate-800 p-3 rounded-2xl border border-slate-700">
-               <div><h2 className="text-xs font-black text-white uppercase tracking-widest">Reporte de Guardia</h2><p className="text-[9px] text-slate-400">Imprimir y Limpiar Panel</p></div>
-               <button onClick={generateDailyReport} disabled={generatingPdf} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase flex items-center gap-2 shadow-lg disabled:opacity-50"><span className="material-symbols-outlined text-sm">print</span> {generatingPdf ? '...' : 'Cerrar Guardia'}</button>
-            </div>
-            {historyLog.length === 0 && <p className="text-center text-xs text-slate-400 py-10">Sin visitas finalizadas.</p>}
-            <div className="space-y-2">
-              {historyLog.map((log) => (
-                <div key={log.id} onClick={() => setSelectedLog(log)} className="bg-slate-800 p-4 rounded-2xl border border-slate-700 flex justify-between items-center cursor-pointer hover:bg-slate-700/50">
-                  <div className="flex items-center gap-3"><span className="material-symbols-outlined text-slate-500">history</span><div><p className="text-sm font-bold text-slate-300">{log.name}</p><p className="text-[10px] text-yellow-500 uppercase font-bold">Destino: {log.unit}</p></div></div>
+          <div className="space-y-2">
+            {historyLog.map((log) => (
+               <div key={log.id} onClick={() => setSelectedLog(log)} className="bg-slate-800 p-4 rounded-2xl border border-slate-700 flex justify-between items-center">
+                  <div><p className="text-sm font-bold text-slate-300">{log.name}</p><p className="text-[10px] text-yellow-500 uppercase font-bold">{log.unit}</p></div>
                   <div className="text-right"><p className="text-[9px] text-slate-400 uppercase">Salida</p><p className="text-xs font-black text-white">{log.exitTime}</p></div>
-                </div>
-              ))}
-            </div>
-            {selectedLog && (
-              <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
-                <div className="bg-slate-900 border border-slate-700 w-full max-w-sm rounded-3xl p-6 shadow-2xl relative">
-                  <button onClick={() => setSelectedLog(null)} className="absolute top-4 right-4 text-slate-500 hover:text-white"><span className="material-symbols-outlined">close</span></button>
-                  <h3 className="text-lg font-black text-white uppercase tracking-wider mb-1">Ficha de Visita</h3>
-                  <div className="space-y-4 mt-6">
-                    <div className="bg-slate-800 p-4 rounded-xl"><p className="text-[10px] text-slate-400 uppercase font-bold">Visitante</p><p className="text-lg font-black text-white">{selectedLog.name}</p><p className="text-sm text-slate-300">CI: {selectedLog.idNumber}</p></div>
-                    <div className="grid grid-cols-2 gap-3"><div className="bg-slate-800 p-3 rounded-xl"><p className="text-[10px] text-slate-400 uppercase font-bold">Entrada</p><p className="text-sm font-black text-green-400">{selectedLog.entryTime || '--'}</p></div><div className="bg-slate-800 p-3 rounded-xl"><p className="text-[10px] text-slate-400 uppercase font-bold">Salida</p><p className="text-sm font-black text-red-400">{selectedLog.exitTime || '--'}</p></div></div>
-                    <div className="space-y-2 text-xs text-slate-300 px-1">
-                      <div className="flex justify-between border-b border-slate-800 pb-2"><span>Destino:</span> <span className="font-bold text-yellow-500">{selectedLog.unit}</span></div>
-                      <div className="flex justify-between border-b border-slate-800 pb-2"><span>Tipo:</span> <span className="font-bold uppercase">{selectedLog.type}</span></div>
-                      <div className="flex justify-between border-b border-slate-800 pb-2"><span>Vehículo:</span> <span className="font-bold uppercase">{selectedLog.vehiclePlate || 'N/A'}</span></div>
-                      {selectedLog.deliveryCompany && <div className="flex justify-between border-b border-slate-800 pb-2"><span>Empresa:</span> <span className="font-bold text-orange-400 uppercase">{selectedLog.deliveryCompany}</span></div>}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-          </section>
+               </div>
+            ))}
+            <button onClick={generateDailyReport} className="w-full py-4 mt-4 bg-blue-600 rounded-xl font-bold uppercase text-xs">Cerrar Guardia (PDF)</button>
+          </div>
         )}
 
-        {/* TAB 3: MOROSIDAD */}
-        {activeTab === 'morosidad' && (
-          <section className="space-y-3 animate-in fade-in slide-in-from-right-4">
-             {morosos.map((m, i) => (
-                <div key={i} className="bg-slate-800 p-5 rounded-2xl border-l-4 border-l-red-500 border border-slate-700 flex justify-between items-center">
-                   <div><p className="text-lg font-black text-white">{m.unit}</p></div>
-                   <div className="text-right"><p className="text-sm font-black text-red-500">{m.debt}</p><p className="text-[9px] font-black uppercase text-red-900 bg-red-500/20 px-2 rounded mt-1">{m.status}</p></div>
-                </div>
-             ))}
-          </section>
-        )}
+        {activeTab === 'morosidad' && morosos.map((m, i) => (
+          <div key={i} className="bg-slate-800 p-5 rounded-2xl border-l-4 border-l-red-500 border border-slate-700 flex justify-between items-center">
+             <div><p className="text-lg font-black text-white">{m.unit}</p></div>
+             <div className="text-right"><p className="text-sm font-black text-red-500">{m.debt}</p><p className="text-[9px] font-black uppercase text-red-900 bg-red-500/20 px-2 rounded mt-1">{m.status}</p></div>
+          </div>
+        ))}
       </main>
     </div>
   );
