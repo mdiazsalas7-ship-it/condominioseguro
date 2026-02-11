@@ -1,13 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { AccessInvitation } from '../types';
 import { db } from '../firebase';
-// AGREGADO: getDoc a los imports
+// Importamos getDoc para buscar el token
 import { collection, query, where, onSnapshot, doc, updateDoc, limit, writeBatch, getDoc } from 'firebase/firestore';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Scanner } from '@yudiel/react-qr-scanner'; 
 
-// --- CLAVE DE API CONFIGURADA ---
+// --- CLAVE DE API (USADA PARA ENVIAR NOTIFICACIONES) ---
 const FIREBASE_SERVER_KEY = "AIzaSyC8jYuK_-ZTMiUv3_ksmEb0CEra7oqmYiw"; 
 
 interface Props {
@@ -55,7 +55,7 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
     });
   }, []);
 
-  // --- FUNCIÓN NUEVA: DISPARAR NOTIFICACIÓN ---
+  // --- FUNCIÓN DE NOTIFICACIÓN (CON PROXY PARA EVITAR CORS) ---
   const notifyOwner = async (invitation: AccessInvitation) => {
     try {
       // 1. Buscamos el token del dueño
@@ -67,8 +67,11 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
         const token = userData.fcmToken;
 
         if (token) {
-          // 2. Enviamos el mensaje a Firebase
-          await fetch('https://fcm.googleapis.com/fcm/send', {
+          console.log("Intentando enviar notificación a:", userData.name);
+          
+          // 2. Enviamos el mensaje USANDO EL PROXY 'corsproxy.io'
+          // Esto evita el error rojo de CORS en el navegador
+          const response = await fetch('https://corsproxy.io/?https://fcm.googleapis.com/fcm/send', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -85,33 +88,36 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
               }
             })
           });
-          console.log("Notificación enviada a:", userData.name);
+
+          if (response.ok) {
+             console.log("✅ Notificación enviada con éxito (vía Proxy).");
+          } else {
+             console.error("❌ Error enviando:", await response.text());
+          }
+
+        } else {
+          console.log("⚠️ El usuario no tiene token FCM activo.");
         }
       }
     } catch (error) {
-      console.error("Error enviando notificación:", error);
+      console.error("Error general de notificación:", error);
     }
   };
 
-  // --- 3. CORRECCIÓN DE LA LÓGICA DE ESCANEO ---
+  // --- LÓGICA DE ESCANEO ---
   const handleQrScan = (detectedCodes: any) => {
-    // La librería devuelve un array, extraemos el primer valor
     if (detectedCodes && detectedCodes.length > 0) {
       const rawValue = detectedCodes[0].rawValue; 
       
       if (rawValue) {
-        setIsScanning(false); // Detener cámara
-        
-        // Buscamos el ID exacto en la base de datos
+        setIsScanning(false);
         const found = activeInvitations.find(inv => inv.id === rawValue);
         
         if (found) {
-          // ÉXITO: Encontrado y Válido
-          if (navigator.vibrate) navigator.vibrate([100, 50, 100]); // Vibración doble
+          if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
           setScannedVisitor(found);
         } else {
-          // ERROR: No encontrado (Expirado o Falso)
-          if (navigator.vibrate) navigator.vibrate(500); // Vibración larga error
+          if (navigator.vibrate) navigator.vibrate(500);
           alert("❌ CÓDIGO NO VÁLIDO.\n\nEste pase no existe en la lista activa, ya salió o es falso.");
           setIsScanning(false);
         }
@@ -119,7 +125,7 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
     }
   };
 
-  // 4. GENERAR REPORTE (Sin cambios)
+  // GENERAR REPORTE
   const generateDailyReport = async () => {
     if (historyLog.length === 0 && activeInvitations.length === 0) return alert("No hay registros.");
     if (!confirm("¿Generar Reporte y CERRAR GUARDIA?\nEsto archivará las visitas del historial.")) return;
@@ -173,9 +179,6 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
   };
 
   const processAccess = async (visitor: AccessInvitation, action: 'ENTRAR' | 'SALIR') => {
-    // Confirmación visual ya está en el botón, procedemos directo o con confirm
-    // if (!confirm(`¿Confirmar ${action}?`)) return; // Opcional si ya el botón es claro
-    
     try {
       const docRef = doc(db, 'access_invitations', visitor.id);
       const now = new Date().toLocaleTimeString('es-VE', { hour: '2-digit', minute: '2-digit', hour12: true });
@@ -199,14 +202,13 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
       <div className="fixed inset-0 z-[100] bg-black flex flex-col items-center justify-center">
         <div className="w-full max-w-md aspect-square relative rounded-3xl overflow-hidden border-4 border-blue-500 shadow-2xl bg-black">
           <Scanner 
-            onScan={(result) => handleQrScan(result)} // <--- USO CORRECTO: onScan
+            onScan={(result) => handleQrScan(result)}
             onError={(error) => console.log(error?.message)}
-            components={{ audio: false, torch: true }} // Opciones extra
+            components={{ audio: false, torch: true }}
             styles={{ container: { width: '100%', height: '100%' } }}
           />
           <div className="absolute inset-0 border-[50px] border-black/50 pointer-events-none flex items-center justify-center">
             <div className="size-60 border-2 border-white/50 rounded-xl relative">
-                {/* Esquinas visuales */}
                 <div className="absolute top-0 left-0 w-6 h-6 border-t-4 border-l-4 border-green-500 -mt-1 -ml-1"></div>
                 <div className="absolute top-0 right-0 w-6 h-6 border-t-4 border-r-4 border-green-500 -mt-1 -mr-1"></div>
                 <div className="absolute bottom-0 left-0 w-6 h-6 border-b-4 border-l-4 border-green-500 -mb-1 -ml-1"></div>
@@ -265,15 +267,12 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
               </div>
             )}
 
-            {/* MODAL VISITANTE ENCONTRADO (VALIDACIÓN VISUAL) */}
+            {/* MODAL VISITANTE ENCONTRADO */}
             {scannedVisitor && (
               <div className="bg-slate-800 border-2 border-green-500 rounded-3xl p-6 shadow-2xl animate-in zoom-in-95 relative overflow-hidden">
-                 
-                 {/* CINTILLO DE VALIDACIÓN */}
                  <div className="absolute top-0 left-0 right-0 bg-green-500 py-1 text-center">
                     <p className="text-[10px] font-black text-white uppercase tracking-[0.2em]">✅ Pase Válido / Legal</p>
                  </div>
-
                  <div className="flex justify-between items-start mb-4 mt-4">
                     <div>
                       <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">{scannedVisitor.type}</p>
