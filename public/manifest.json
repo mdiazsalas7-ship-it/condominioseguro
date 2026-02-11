@@ -1,7 +1,6 @@
 {
     "short_name": "Condominio",
     "name": "App Condominio Seguro",
-    "description": "Sistema de Control de Acceso para Residencias",
     "icons": [
       {
         "src": "logo192.png",
@@ -16,9 +15,9 @@
         "purpose": "any maskable"
       }
     ],
-    "start_url": ".",
+    "start_url": "./",
     "display": "standalone",
-    "orientation": "portrait",
     "theme_color": "#137fec",
-    "background_color": "#ffffff"
+    "background_color": "#ffffff",
+    "scope": "/"
   }
