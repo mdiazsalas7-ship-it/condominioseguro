@@ -1,0 +1,8 @@
+{
+  "name": "Condominio Seguro - Gestión Residencial",
+  "description": "Una plataforma integral para la gestión de condominios, permitiendo a residentes reportar pagos, generar accesos y a administradores conciliar finanzas y gestionar averías.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ]
+}
