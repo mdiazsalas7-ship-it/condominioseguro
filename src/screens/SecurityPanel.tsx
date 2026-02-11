@@ -1,10 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { AccessInvitation } from '../types';
 import { db } from '../firebase';
-import { collection, query, where, onSnapshot, doc, updateDoc, limit, writeBatch } from 'firebase/firestore';
+// AGREGADO: getDoc a los imports
+import { collection, query, where, onSnapshot, doc, updateDoc, limit, writeBatch, getDoc } from 'firebase/firestore';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Scanner } from '@yudiel/react-qr-scanner'; 
+
+// --- CLAVE DE API CONFIGURADA ---
+const FIREBASE_SERVER_KEY = "AIzaSyC8jYuK_-ZTMiUv3_ksmEb0CEra7oqmYiw"; 
 
 interface Props {
   setScreen: (s: string) => void;
@@ -50,6 +54,44 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
       setHistoryLog(currentShiftLogs);
     });
   }, []);
+
+  // --- FUNCIÓN NUEVA: DISPARAR NOTIFICACIÓN ---
+  const notifyOwner = async (invitation: AccessInvitation) => {
+    try {
+      // 1. Buscamos el token del dueño
+      const userRef = doc(db, 'users', invitation.author);
+      const userSnap = await getDoc(userRef);
+      
+      if (userSnap.exists()) {
+        const userData = userSnap.data();
+        const token = userData.fcmToken;
+
+        if (token) {
+          // 2. Enviamos el mensaje a Firebase
+          await fetch('https://fcm.googleapis.com/fcm/send', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `key=${FIREBASE_SERVER_KEY}`
+            },
+            body: JSON.stringify({
+              to: token,
+              notification: {
+                title: '🔔 Visita Llegando',
+                body: `${invitation.name} (${invitation.type}) ha ingresado al condominio.`
+              },
+              data: {
+                click_action: "FLUTTER_NOTIFICATION_CLICK"
+              }
+            })
+          });
+          console.log("Notificación enviada a:", userData.name);
+        }
+      }
+    } catch (error) {
+      console.error("Error enviando notificación:", error);
+    }
+  };
 
   // --- 3. CORRECCIÓN DE LA LÓGICA DE ESCANEO ---
   const handleQrScan = (detectedCodes: any) => {
@@ -141,6 +183,12 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
         status: action === 'ENTRAR' ? 'EN SITIO' : 'SALIDA', 
         [action === 'ENTRAR' ? 'entryTime' : 'exitTime']: now 
       });
+
+      // 🔥 SI ESTÁ ENTRANDO, DISPARAMOS LA NOTIFICACIÓN
+      if (action === 'ENTRAR') {
+        notifyOwner(visitor);
+      }
+
       setScannedVisitor(null);
     } catch (e) { alert("Error conexión"); }
   };
