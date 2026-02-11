@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { AccessInvitation } from '../types';
 import { db } from '../firebase';
-import { collection, query, where, onSnapshot, doc, updateDoc } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, doc, updateDoc, limit, writeBatch } from 'firebase/firestore';
+import { jsPDF } from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 interface Props {
   setScreen: (s: string) => void;
@@ -9,275 +11,335 @@ interface Props {
 }
 
 const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
-  const [activeTab, setActiveTab] = useState<'control' | 'morosidad'>('control');
-  const [invitations, setInvitations] = useState<AccessInvitation[]>([]);
-  const [scannedVisitor, setScannedVisitor] = useState<AccessInvitation | null>(null);
+  const [activeTab, setActiveTab] = useState<'control' | 'historial' | 'morosidad'>('control');
   
-  // Estado para búsqueda manual
+  // Listas de datos
+  const [activeInvitations, setActiveInvitations] = useState<AccessInvitation[]>([]); // Pendientes y En Sitio
+  const [historyLog, setHistoryLog] = useState<AccessInvitation[]>([]); // Solo Salidas NO archivadas
+  
+  // Modales y Estados
+  const [scannedVisitor, setScannedVisitor] = useState<AccessInvitation | null>(null);
+  const [selectedLog, setSelectedLog] = useState<AccessInvitation | null>(null);
   const [isManualEntry, setIsManualEntry] = useState(false);
   const [manualSearchCedula, setManualSearchCedula] = useState('');
+  const [generatingPdf, setGeneratingPdf] = useState(false);
 
-  // 1. Escuchar invitaciones activas (PENDIENTE o EN SITIO) de Firebase
+  // 1. TIEMPO REAL: ACTIVOS (PENDIENTE / EN SITIO)
+  // Estos NUNCA se borran al imprimir, deben permanecer hasta que salgan.
   useEffect(() => {
     const q = query(
       collection(db, 'access_invitations'),
       where('status', 'in', ['PENDIENTE', 'EN SITIO'])
     );
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const docs = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as AccessInvitation[];
-      
-      // Ordenar: Primero los que están EN SITIO, luego los PENDIENTES
+    return onSnapshot(q, (snapshot) => {
+      const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as AccessInvitation[];
+      // Ordenar: Primero los que están ADENTRO
       docs.sort((a, b) => (a.status === 'EN SITIO' ? -1 : 1));
-      
-      setInvitations(docs);
+      setActiveInvitations(docs);
     });
-
-    return () => unsubscribe();
   }, []);
 
-  // 2. Simular Escaneo de QR (El QR contiene el ID del documento)
+  // 2. TIEMPO REAL: HISTORIAL DE GUARDIA ACTUAL
+  // Solo mostramos 'SALIDA' que NO haya sido archivada (archived != true)
+  // Esto permite que al imprimir, se marquen como true y desaparezcan de aquí.
+  useEffect(() => {
+    const qHistory = query(
+      collection(db, 'access_invitations'),
+      where('status', '==', 'SALIDA'),
+      limit(100) // Límite razonable para una guardia
+    );
+    
+    return onSnapshot(qHistory, (snapshot) => {
+      const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as AccessInvitation[];
+      
+      // Filtramos en cliente para asegurar que solo se vean los NO archivados
+      // (Para evitar requerir índices complejos de inmediato en Firebase)
+      const currentShiftLogs = docs.filter(doc => !(doc as any).archived);
+      
+      // Ordenar por hora de salida (más reciente arriba)
+      currentShiftLogs.sort((a, b) => {
+         const timeA = a.exitTime || '';
+         const timeB = b.exitTime || '';
+         return timeB.localeCompare(timeA); 
+      });
+      
+      setHistoryLog(currentShiftLogs);
+    });
+  }, []);
+
+  // 3. GENERAR REPORTE Y LIMPIAR GUARDIA
+  const generateDailyReport = async () => {
+    if (historyLog.length === 0 && activeInvitations.length === 0) {
+      alert("No hay registros para generar reporte.");
+      return;
+    }
+
+    if (!confirm("¿Generar Reporte de Guardia?\n\n⚠️ Esto archivará las visitas finalizadas y limpiará el historial visual para el siguiente turno.")) {
+      return;
+    }
+
+    setGeneratingPdf(true);
+    try {
+      const doc = new jsPDF();
+      const today = new Date().toLocaleDateString('es-VE');
+      const timeNow = new Date().toLocaleTimeString('es-VE');
+
+      // --- ENCABEZADO ---
+      doc.setFillColor(30, 58, 138); 
+      doc.rect(14, 10, 25, 25, 'F'); 
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(16);
+      doc.text("CS", 19, 27); 
+
+      doc.setTextColor(0, 0, 0);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(16);
+      doc.text("URBANIZACIÓN CONDOMINIO SEGURO", 45, 20);
+      
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(10);
+      doc.text("REPORTE DE CIERRE DE GUARDIA", 45, 26);
+      doc.text(`Fecha: ${today}  |  Cierre: ${timeNow}`, 45, 32);
+
+      // --- DATOS (Incluye activos y cerrados de esta guardia) ---
+      const allRecords = [...activeInvitations, ...historyLog];
+      
+      const tableData = allRecords.map(row => [
+        row.entryTime || '--:--',
+        row.exitTime || (row.status === 'EN SITIO' ? 'En Sitio' : 'Pendiente'),
+        row.unit, 
+        row.name,
+        row.idNumber,
+        row.type === 'Delivery' ? `Delivery (${row.deliveryCompany || 'App'})` : `Visitante ${row.vehiclePlate ? `(${row.vehiclePlate})` : ''}`,
+        row.status
+      ]);
+
+      autoTable(doc, {
+        startY: 45,
+        head: [['Entrada', 'Salida', 'Apto/Torre', 'Nombre', 'Cédula', 'Detalle', 'Estado']],
+        body: tableData,
+        theme: 'grid',
+        headStyles: { fillColor: [30, 58, 138], halign: 'center', fontSize: 8 },
+        styles: { fontSize: 7, cellPadding: 2 },
+        columnStyles: {
+          0: { halign: 'center' },
+          1: { halign: 'center' },
+          2: { fontStyle: 'bold', halign: 'center' },
+          6: { halign: 'center' }
+        }
+      });
+
+      // --- FIRMAS ---
+      const finalY = (doc as any).lastAutoTable.finalY + 30; // Usar posición final de tabla
+      doc.setLineWidth(0.5);
+
+      doc.line(30, finalY, 80, finalY);
+      doc.setFontSize(8);
+      doc.setFont("helvetica", "bold");
+      doc.text("ENTREGA GUARDIA", 55, finalY + 5, { align: 'center' });
+      
+      doc.line(130, finalY, 180, finalY);
+      doc.text("RECIBE GUARDIA", 155, finalY + 5, { align: 'center' });
+
+      doc.save(`Guardia_${today.replace(/\//g, '-')}_${timeNow.replace(/:/g, '')}.pdf`);
+
+      // --- LIMPIEZA DE PANEL (ARCHIVADO) ---
+      // Solo archivamos las que tienen status 'SALIDA' que están en el historial actual
+      if (historyLog.length > 0) {
+        const batch = writeBatch(db);
+        
+        historyLog.forEach(log => {
+          // Solo marcamos como archivadas las que ya salieron
+          if (log.status === 'SALIDA') {
+            const ref = doc(db, 'access_invitations', log.id);
+            batch.update(ref, { archived: true });
+          }
+        });
+
+        await batch.commit();
+        // Al hacer commit, el listener 'onSnapshot' de useEffect detectará el cambio
+        // y como filtramos (!doc.archived), desaparecerán visualmente de la lista.
+      }
+
+    } catch (error) {
+      console.error("Error reporte:", error);
+      alert("Error generando reporte o archivando datos.");
+    } finally {
+      setGeneratingPdf(false);
+    }
+  };
+
+  // --- CONTROL DE ACCESOS ---
   const handleScan = () => {
-    const qrCodeContent = prompt("SIMULADOR CÁMARA:\nIntroduce el código del QR (ID de la invitación):");
-    if (!qrCodeContent) return;
-
-    const found = invitations.find(inv => inv.id === qrCodeContent);
+    const qrCode = prompt("SIMULADOR ESCÁNER:\nIngrese ID del QR:");
+    if (!qrCode) return;
+    const found = activeInvitations.find(inv => inv.id === qrCode);
+    
     if (found) {
       setScannedVisitor(found);
     } else {
-      alert("❌ Invitación no encontrada o expirada.");
+      // Buscar si ya salió (para informar)
+      alert("❌ Invitación no encontrada en lista activa.\nPuede que ya haya registrado su salida o sea inválida.");
     }
   };
 
-  // 3. Buscar manualmente por Cédula
   const handleManualSearch = () => {
-    const found = invitations.find(inv => inv.idNumber.includes(manualSearchCedula));
-    if (found) {
-      setScannedVisitor(found);
-      setIsManualEntry(false);
-      setManualSearchCedula('');
-    } else {
-      alert("❌ No se encontró ninguna invitación activa para esa cédula.");
-    }
+    const found = activeInvitations.find(inv => inv.idNumber.includes(manualSearchCedula));
+    if (found) { setScannedVisitor(found); setIsManualEntry(false); setManualSearchCedula(''); } 
+    else alert("❌ No encontrada en lista activa.");
   };
 
-  // 4. Procesar Entrada o Salida en Firebase
   const processAccess = async (visitor: AccessInvitation, action: 'ENTRAR' | 'SALIR') => {
     if (!confirm(`¿Confirmar ${action} de ${visitor.name}?`)) return;
-
     try {
       const docRef = doc(db, 'access_invitations', visitor.id);
+      const now = new Date().toLocaleTimeString('es-VE', { hour: '2-digit', minute: '2-digit', hour12: true });
       
-      if (action === 'ENTRAR') {
-        await updateDoc(docRef, {
-          status: 'EN SITIO',
-          entryTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        });
-      } else {
-        await updateDoc(docRef, {
-          status: 'SALIDA', // Esto hará que desaparezca de la lista por el filtro del query
-          exitTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        });
-      }
+      await updateDoc(docRef, {
+        status: action === 'ENTRAR' ? 'EN SITIO' : 'SALIDA',
+        [action === 'ENTRAR' ? 'entryTime' : 'exitTime']: now
+      });
+      
       setScannedVisitor(null);
-    } catch (error) {
-      console.error("Error actualizando acceso:", error);
-      alert("Error de conexión");
-    }
+    } catch (e) { alert("Error al registrar"); }
   };
 
-  // Datos mock para morosidad (esto se conectaría a otra colección luego)
   const morosos = [
     { unit: '102-A', resident: 'Pedro Gomez', debt: '$150.00', status: 'Restringido' },
-    { unit: '304-B', resident: 'Ana Rivas', debt: '$45.00', status: 'Pendiente' },
     { unit: '501-A', resident: 'Jose Ferrer', debt: '$320.00', status: 'Crítico' },
   ];
 
   return (
-    <div className="flex flex-col min-h-full pb-24 bg-slate-50 dark:bg-slate-900">
-      <header className="sticky top-0 z-50 bg-slate-900 text-white px-4 py-4 shadow-2xl">
-        <div className="flex items-center justify-between mb-4">
+    <div className="flex flex-col min-h-screen bg-slate-900 text-white pb-20">
+      
+      <header className="p-4 bg-slate-800 border-b border-slate-700 shadow-lg sticky top-0 z-50">
+        <div className="flex justify-between items-center mb-4">
           <div className="flex items-center gap-3">
-            <div className="size-10 bg-blue-600 rounded-lg flex items-center justify-center">
-              <span className="material-symbols-outlined">security</span>
-            </div>
-            <div>
-              <h1 className="text-sm font-black tracking-tighter uppercase leading-none">Garita de Control</h1>
-              <p className="text-[10px] text-blue-400 font-bold uppercase tracking-widest mt-1">Seguridad Condominio</p>
-            </div>
+            <div className="size-10 bg-blue-600 rounded-xl flex items-center justify-center shadow-lg"><span className="material-symbols-outlined text-white">security</span></div>
+            <div><h1 className="text-sm font-black uppercase tracking-widest">Garita Principal</h1><p className="text-[10px] font-bold text-blue-400">Control de Acceso</p></div>
           </div>
-          <button onClick={onLogout} className="size-10 rounded-full bg-white/10 text-white flex items-center justify-center hover:bg-red-500/20 transition-colors">
-            <span className="material-symbols-outlined">logout</span>
-          </button>
+          <button onClick={onLogout} className="size-10 rounded-full bg-slate-700 flex items-center justify-center hover:bg-red-500/20 hover:text-red-400"><span className="material-symbols-outlined">logout</span></button>
         </div>
-        
-        <div className="flex bg-white/5 p-1 rounded-xl">
-          <button onClick={() => setActiveTab('control')} className={`flex-1 py-2 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all ${activeTab === 'control' ? 'bg-blue-600 text-white shadow-lg' : 'text-white/60'}`}>Accesos</button>
-          <button onClick={() => setActiveTab('morosidad')} className={`flex-1 py-2 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all ${activeTab === 'morosidad' ? 'bg-red-600 text-white shadow-lg' : 'text-white/60'}`}>Morosidad</button>
+        <div className="flex bg-slate-900 p-1 rounded-xl border border-slate-700">
+          <button onClick={() => setActiveTab('control')} className={`flex-1 py-2 text-[10px] font-black uppercase rounded-lg transition-all ${activeTab === 'control' ? 'bg-blue-600 text-white' : 'text-slate-500 hover:text-white'}`}>Accesos ({activeInvitations.length})</button>
+          <button onClick={() => setActiveTab('historial')} className={`flex-1 py-2 text-[10px] font-black uppercase rounded-lg transition-all ${activeTab === 'historial' ? 'bg-slate-600 text-white' : 'text-slate-500 hover:text-white'}`}>Historial ({historyLog.length})</button>
+          <button onClick={() => setActiveTab('morosidad')} className={`flex-1 py-2 text-[10px] font-black uppercase rounded-lg transition-all ${activeTab === 'morosidad' ? 'bg-red-600 text-white' : 'text-slate-500 hover:text-white'}`}>Morosidad</button>
         </div>
       </header>
 
       <main className="p-4 space-y-6">
-        {activeTab === 'control' ? (
+        
+        {/* TAB 1: CONTROL (PENDIENTES Y EN SITIO) */}
+        {activeTab === 'control' && (
           <>
-            {/* ESCÁNER O BÚSQUEDA */}
-            <section className="space-y-4">
-              {!scannedVisitor && !isManualEntry ? (
-                <div className="grid grid-cols-2 gap-3">
-                  <button onClick={handleScan} className="flex flex-col items-center justify-center aspect-square bg-slate-900 rounded-3xl border-2 border-slate-800 shadow-xl group active:scale-95 transition-all hover:border-blue-500">
-                    <span className="material-symbols-outlined text-4xl mb-2 text-white group-hover:text-blue-400">qr_code_scanner</span>
-                    <p className="text-[10px] text-white font-black uppercase tracking-widest">Escanear QR</p>
-                  </button>
-                  <button onClick={() => setIsManualEntry(true)} className="flex flex-col items-center justify-center aspect-square bg-white dark:bg-slate-800 rounded-3xl border border-slate-200 dark:border-slate-700 shadow-sm group active:scale-95 transition-all">
-                    <span className="material-symbols-outlined text-slate-400 text-4xl mb-2 group-hover:text-blue-600 transition-colors">search</span>
-                    <p className="text-[10px] text-slate-500 font-black uppercase tracking-widest">Buscar Cédula</p>
-                  </button>
-                </div>
-              ) : isManualEntry ? (
-                <div className="bg-white dark:bg-slate-800 rounded-3xl p-6 border-2 border-blue-600 shadow-2xl space-y-4 animate-in zoom-in-95">
-                  <h3 className="text-sm font-black uppercase tracking-widest text-blue-600">Búsqueda Manual</h3>
-                  <div className="space-y-3">
-                    <input 
-                      value={manualSearchCedula} 
-                      onChange={e => setManualSearchCedula(e.target.value)} 
-                      placeholder="Ingrese Cédula..." 
-                      type="number"
-                      className="w-full bg-slate-100 dark:bg-slate-900 border-none rounded-xl h-12 px-4 text-sm font-bold" 
-                    />
-                  </div>
-                  <div className="flex gap-2 pt-2">
-                    <button onClick={() => setIsManualEntry(false)} className="flex-1 h-12 bg-slate-100 dark:bg-slate-900 rounded-xl font-bold text-xs uppercase text-slate-500">Cancelar</button>
-                    <button onClick={handleManualSearch} className="flex-[2] h-12 bg-blue-600 text-white rounded-xl font-black text-xs uppercase">Buscar</button>
-                  </div>
-                </div>
-              ) : (
-                /* MODAL DE VISITANTE ESCANEADO */
-                <div className="bg-white dark:bg-slate-800 rounded-3xl p-6 border-2 border-emerald-500 shadow-2xl space-y-4 animate-in slide-in-from-bottom-5">
-                   <div className="flex items-center gap-3">
-                      <span className={`material-symbols-outlined text-3xl ${scannedVisitor.status === 'EN SITIO' ? 'text-amber-500' : 'text-emerald-500'}`}>
-                        {scannedVisitor.status === 'EN SITIO' ? 'logout' : 'verified'}
-                      </span>
-                      <div>
-                        <h2 className="text-lg font-black leading-none text-slate-900 dark:text-white">{scannedVisitor.name}</h2>
-                        
-                        {/* AQUI MOSTRAMOS EL TIPO Y LA EMPRESA SI APLICA */}
-                        <div className="flex gap-2 mt-1">
-                          <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{scannedVisitor.type}</span>
-                          {scannedVisitor.type === 'Delivery' && scannedVisitor.deliveryCompany && (
-                            <span className="text-[10px] font-black text-orange-500 uppercase tracking-widest bg-orange-100 px-1 rounded">{scannedVisitor.deliveryCompany}</span>
-                          )}
-                        </div>
-                      </div>
-                   </div>
-                   
-                   <div className="bg-slate-50 dark:bg-slate-900 p-4 rounded-2xl space-y-2">
-                      <div className="flex justify-between border-b border-slate-200 dark:border-slate-800 pb-2">
-                        <span className="text-xs text-slate-400 font-bold">Estado Actual</span>
-                        <span className={`text-xs font-black px-2 rounded ${scannedVisitor.status === 'EN SITIO' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>{scannedVisitor.status}</span>
-                      </div>
-                      <p className="text-xs font-bold text-slate-700 dark:text-slate-300"><span className="text-slate-400 w-16 inline-block">Destino:</span> {scannedVisitor.unit}</p>
-                      <p className="text-xs font-bold text-slate-700 dark:text-slate-300"><span className="text-slate-400 w-16 inline-block">Cédula:</span> {scannedVisitor.idNumber}</p>
-                      <p className="text-xs font-bold text-slate-700 dark:text-slate-300"><span className="text-slate-400 w-16 inline-block">Placa:</span> {scannedVisitor.vehiclePlate}</p>
-                   </div>
-
-                   <div className="flex gap-2">
-                      <button onClick={() => setScannedVisitor(null)} className="flex-1 h-12 bg-slate-100 dark:bg-slate-700 rounded-xl font-bold text-xs uppercase text-slate-500 dark:text-slate-300">Cerrar</button>
-                      
-                      {scannedVisitor.status === 'PENDIENTE' ? (
-                        <button onClick={() => processAccess(scannedVisitor, 'ENTRAR')} className="flex-[2] h-12 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl font-black text-xs uppercase shadow-lg shadow-emerald-500/20">
-                          Autorizar Entrada
-                        </button>
-                      ) : (
-                        <button onClick={() => processAccess(scannedVisitor, 'SALIR')} className="flex-[2] h-12 bg-slate-900 hover:bg-black text-white rounded-xl font-black text-xs uppercase shadow-lg">
-                          Registrar Salida
-                        </button>
-                      )}
-                   </div>
-                </div>
-              )}
-            </section>
-
-            {/* LISTA EN TIEMPO REAL */}
-            <section className="space-y-4">
-              <h2 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] px-1">Actividad Reciente</h2>
-              
-              {invitations.length === 0 && (
-                <div className="text-center py-10 opacity-50">
-                  <span className="material-symbols-outlined text-4xl text-slate-300">history_toggle_off</span>
-                  <p className="text-xs font-bold text-slate-400 mt-2">Sin actividad pendiente</p>
-                </div>
-              )}
-
-              <div className="space-y-2">
-                {invitations.map((visitor) => (
-                  <div key={visitor.id} className={`p-4 rounded-2xl border flex justify-between items-center shadow-sm transition-all ${
-                    visitor.status === 'EN SITIO' 
-                      ? 'bg-green-50 dark:bg-green-900/10 border-green-200 dark:border-green-900/30' 
-                      : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700'
-                  }`}>
-                    <div className="flex items-center gap-4">
-                      <div className={`size-10 rounded-xl flex items-center justify-center text-white ${
-                        visitor.type === 'Delivery' ? 'bg-orange-400' : 'bg-blue-400'
-                      }`}>
-                        <span className="material-symbols-outlined text-lg">
-                          {visitor.type === 'Delivery' ? 'two_wheeler' : 'person'}
-                        </span>
-                      </div>
-                      <div>
-                        <p className="text-sm font-black text-slate-900 dark:text-white">{visitor.name}</p>
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{visitor.unit}</p>
-                          
-                          {/* AQUI TAMBIEN MOSTRAMOS LA EMPRESA */}
-                          {visitor.type === 'Delivery' && visitor.deliveryCompany && (
-                            <span className="text-[9px] font-black bg-orange-100 text-orange-600 px-1 rounded uppercase">{visitor.deliveryCompany}</span>
-                          )}
-                          
-                          {visitor.status === 'EN SITIO' && <span className="size-2 bg-green-500 rounded-full animate-pulse"></span>}
-                        </div>
-                      </div>
-                    </div>
-                    
-                    {visitor.status === 'EN SITIO' ? (
-                      <button onClick={() => processAccess(visitor, 'SALIR')} className="bg-slate-900 dark:bg-slate-700 text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest hover:scale-105 transition-transform">
-                        Salida
-                      </button>
-                    ) : (
-                      <span className="text-[9px] font-bold text-amber-500 uppercase bg-amber-50 dark:bg-amber-900/20 px-2 py-1 rounded">Pendiente</span>
-                    )}
-                  </div>
-                ))}
+            {!scannedVisitor && !isManualEntry && (
+              <div className="grid grid-cols-2 gap-4">
+                <button onClick={handleScan} className="bg-blue-600 hover:bg-blue-500 p-6 rounded-3xl shadow-xl flex flex-col items-center gap-2 active:scale-95"><span className="material-symbols-outlined text-4xl">qr_code_scanner</span><span className="text-xs font-black uppercase">Escanear</span></button>
+                <button onClick={() => setIsManualEntry(true)} className="bg-slate-800 hover:bg-slate-700 p-6 rounded-3xl border border-slate-700 flex flex-col items-center gap-2 active:scale-95"><span className="material-symbols-outlined text-4xl text-slate-400">search</span><span className="text-xs font-black uppercase text-slate-400">Cédula</span></button>
               </div>
-            </section>
-          </>
-        ) : (
-          /* TAB DE MOROSIDAD (MOCK) */
-          <section className="space-y-4 animate-in fade-in slide-in-from-right-4">
-            <div className="bg-red-50 dark:bg-red-900/10 border border-red-100 dark:border-red-900/30 p-5 rounded-[28px] flex items-center gap-4">
-               <span className="material-symbols-outlined text-red-500 text-4xl">warning</span>
-               <div>
-                 <h3 className="text-sm font-black text-red-600 dark:text-red-400 uppercase tracking-widest">Atención Vigilante</h3>
-                 <p className="text-[10px] font-bold text-red-400 dark:text-red-300 leading-relaxed mt-1">Verificar unidades en lista antes de permitir accesos.</p>
-               </div>
-            </div>
-
-            <div className="space-y-3">
-              {morosos.map((m, i) => (
-                <div key={i} className="bg-white dark:bg-slate-800 p-5 rounded-2xl border-l-4 border-l-red-500 border border-slate-200 dark:border-slate-700 flex justify-between items-center shadow-sm">
-                   <div>
-                      <p className="text-lg font-black tracking-tight text-slate-900 dark:text-white">{m.unit}</p>
-                      <p className="text-xs font-bold text-slate-500">{m.resident}</p>
-                   </div>
-                   <div className="text-right">
-                      <p className="text-sm font-black text-red-500">{m.debt}</p>
-                      <p className="text-[9px] font-black uppercase text-red-300 mt-1">{m.status}</p>
-                   </div>
+            )}
+            {isManualEntry && (
+              <div className="bg-slate-800 p-4 rounded-2xl border border-slate-700 animate-in zoom-in-95">
+                <input value={manualSearchCedula} onChange={e => setManualSearchCedula(e.target.value)} className="w-full bg-slate-900 border-none rounded-xl h-12 px-4 text-white font-bold mb-3" placeholder="Cédula..." />
+                <div className="flex gap-2">
+                  <button onClick={() => setIsManualEntry(false)} className="flex-1 bg-slate-700 h-10 rounded-lg text-xs font-bold uppercase">Cancelar</button>
+                  <button onClick={handleManualSearch} className="flex-1 bg-blue-600 h-10 rounded-lg text-xs font-bold uppercase">Buscar</button>
+                </div>
+              </div>
+            )}
+            {scannedVisitor && (
+              <div className="bg-slate-800 border-2 border-blue-500 rounded-3xl p-6 shadow-2xl animate-in zoom-in-95">
+                 <div className="flex justify-between items-start mb-4">
+                    <div>
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">{scannedVisitor.type}</p>
+                      <h2 className="text-2xl font-black text-white leading-none">{scannedVisitor.name}</h2>
+                      {scannedVisitor.deliveryCompany && <span className="inline-block mt-2 bg-orange-500/20 text-orange-400 text-[10px] font-black uppercase px-2 py-1 rounded">{scannedVisitor.deliveryCompany}</span>}
+                    </div>
+                    <button onClick={() => setScannedVisitor(null)} className="size-8 rounded-full bg-slate-700 flex items-center justify-center"><span className="material-symbols-outlined text-sm">close</span></button>
+                 </div>
+                 <div className="bg-slate-900/50 p-4 rounded-xl space-y-2 mb-6">
+                    <p className="flex justify-between text-xs"><span className="text-slate-400">Destino:</span> <strong className="text-yellow-400">{scannedVisitor.unit}</strong></p>
+                    <p className="flex justify-between text-xs"><span className="text-slate-400">Cédula:</span> <strong>{scannedVisitor.idNumber}</strong></p>
+                    <p className="flex justify-between text-xs"><span className="text-slate-400">Placa:</span> <strong>{scannedVisitor.vehiclePlate}</strong></p>
+                 </div>
+                 <button onClick={() => processAccess(scannedVisitor, scannedVisitor.status === 'PENDIENTE' ? 'ENTRAR' : 'SALIR')} className={`w-full h-14 rounded-2xl font-black uppercase tracking-widest shadow-lg flex items-center justify-center gap-2 ${scannedVisitor.status === 'PENDIENTE' ? 'bg-green-500 hover:bg-green-600' : 'bg-red-500 hover:bg-red-600'}`}><span className="material-symbols-outlined">{scannedVisitor.status === 'PENDIENTE' ? 'login' : 'logout'}</span>{scannedVisitor.status === 'PENDIENTE' ? 'Registrar Entrada' : 'Registrar Salida'}</button>
+              </div>
+            )}
+            <div className="space-y-3 pt-4">
+              <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">En Garita / Pendientes</h3>
+              {activeInvitations.length === 0 && <p className="text-xs text-slate-500 text-center py-4">No hay visitas activas.</p>}
+              {activeInvitations.map(inv => (
+                <div key={inv.id} onClick={() => setScannedVisitor(inv)} className={`p-4 rounded-2xl border flex justify-between items-center cursor-pointer ${inv.status === 'EN SITIO' ? 'bg-green-500/10 border-green-500/30' : 'bg-slate-800 border-slate-700'}`}>
+                  <div><h4 className="font-bold text-sm text-white">{inv.name}</h4><p className="text-[10px] text-slate-400 uppercase font-bold">{inv.unit} • {inv.type}</p></div>
+                  {inv.status === 'EN SITIO' ? <span className="text-[9px] font-black bg-green-500 text-white px-2 py-0.5 rounded uppercase">Adentro</span> : <span className="text-[9px] font-black border border-slate-600 text-slate-500 px-2 py-0.5 rounded uppercase">Pendiente</span>}
                 </div>
               ))}
             </div>
+          </>
+        )}
+
+        {/* TAB 2: HISTORIAL (SOLO NO ARCHIVADOS) */}
+        {activeTab === 'historial' && (
+          <section className="space-y-4 animate-in fade-in slide-in-from-right-4">
+            <div className="flex justify-between items-center bg-slate-800 p-3 rounded-2xl border border-slate-700">
+               <div><h2 className="text-xs font-black text-white uppercase tracking-widest">Reporte de Guardia</h2><p className="text-[9px] text-slate-400">Imprimir y Limpiar Panel</p></div>
+               <button onClick={generateDailyReport} disabled={generatingPdf} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase flex items-center gap-2 shadow-lg disabled:opacity-50"><span className="material-symbols-outlined text-sm">print</span> {generatingPdf ? '...' : 'Cerrar Guardia'}</button>
+            </div>
+            
+            {historyLog.length === 0 && <p className="text-center text-xs text-slate-400 py-10">Sin visitas finalizadas en esta guardia.</p>}
+            
+            <div className="space-y-2">
+              {historyLog.map((log) => (
+                <div key={log.id} onClick={() => setSelectedLog(log)} className="bg-slate-800 p-4 rounded-2xl border border-slate-700 flex justify-between items-center cursor-pointer hover:bg-slate-700/50">
+                  <div className="flex items-center gap-3">
+                    <span className="material-symbols-outlined text-slate-500">history</span>
+                    <div>
+                      <p className="text-sm font-bold text-slate-300">{log.name}</p>
+                      <p className="text-[10px] text-yellow-500 uppercase font-bold">Destino: {log.unit}</p>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[9px] text-slate-400 uppercase">Salida</p>
+                    <p className="text-xs font-black text-white">{log.exitTime}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {selectedLog && (
+              <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
+                <div className="bg-slate-900 border border-slate-700 w-full max-w-sm rounded-3xl p-6 shadow-2xl relative">
+                  <button onClick={() => setSelectedLog(null)} className="absolute top-4 right-4 text-slate-500 hover:text-white"><span className="material-symbols-outlined">close</span></button>
+                  <h3 className="text-lg font-black text-white uppercase tracking-wider mb-1">Ficha de Visita</h3>
+                  <p className="text-xs text-slate-500 mb-6">ID: {selectedLog.id.slice(0,8)}...</p>
+                  <div className="space-y-4">
+                    <div className="bg-slate-800 p-4 rounded-xl"><p className="text-[10px] text-slate-400 uppercase font-bold">Visitante</p><p className="text-lg font-black text-white">{selectedLog.name}</p><p className="text-sm text-slate-300">CI: {selectedLog.idNumber}</p></div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="bg-slate-800 p-3 rounded-xl"><p className="text-[10px] text-slate-400 uppercase font-bold">Entrada</p><p className="text-sm font-black text-green-400">{selectedLog.entryTime || '--'}</p></div>
+                      <div className="bg-slate-800 p-3 rounded-xl"><p className="text-[10px] text-slate-400 uppercase font-bold">Salida</p><p className="text-sm font-black text-red-400">{selectedLog.exitTime || '--'}</p></div>
+                    </div>
+                    <div className="space-y-2 text-xs text-slate-300 px-1">
+                      <div className="flex justify-between border-b border-slate-800 pb-2"><span>Destino:</span> <span className="font-bold text-yellow-500">{selectedLog.unit}</span></div>
+                      <div className="flex justify-between border-b border-slate-800 pb-2"><span>Tipo:</span> <span className="font-bold uppercase">{selectedLog.type}</span></div>
+                      <div className="flex justify-between border-b border-slate-800 pb-2"><span>Vehículo:</span> <span className="font-bold uppercase">{selectedLog.vehiclePlate || 'N/A'}</span></div>
+                      {selectedLog.deliveryCompany && <div className="flex justify-between border-b border-slate-800 pb-2"><span>Empresa:</span> <span className="font-bold text-orange-400 uppercase">{selectedLog.deliveryCompany}</span></div>}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* TAB 3: MOROSIDAD */}
+        {activeTab === 'morosidad' && (
+          <section className="space-y-3 animate-in fade-in slide-in-from-right-4">
+             {morosos.map((m, i) => (
+                <div key={i} className="bg-slate-800 p-5 rounded-2xl border-l-4 border-l-red-500 border border-slate-700 flex justify-between items-center">
+                   <div><p className="text-lg font-black text-white">{m.unit}</p><p className="text-xs text-slate-400">{m.resident}</p></div>
+                   <div className="text-right"><p className="text-sm font-black text-red-500">{m.debt}</p><p className="text-[9px] font-black uppercase text-red-900 bg-red-500/20 px-2 rounded mt-1">{m.status}</p></div>
+                </div>
+             ))}
           </section>
         )}
       </main>
