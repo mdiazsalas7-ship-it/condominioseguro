@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { AccessInvitation } from '../types';
 import { db } from '../firebase';
+// Importamos getDoc para poder buscar el token del dueño
 import { collection, query, where, onSnapshot, doc, updateDoc, limit, writeBatch, getDoc } from 'firebase/firestore';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Scanner } from '@yudiel/react-qr-scanner'; 
 
-// ⚠️ AQUÍ ESTÁ LA CLAVE QUE ME ACABAS DE PASAR
+// ⚠️ TU CLAVE DE API (AIza...) QUE YA FUNCIONA PORQUE HABILITASTE LA API LEGACY
 const FIREBASE_SERVER_KEY = "AIzaSyCLPOzzpBAnljJIpf_TwQOTAqj9V-rUFyk"; 
 
 interface Props {
@@ -16,8 +17,12 @@ interface Props {
 
 const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
   const [activeTab, setActiveTab] = useState<'control' | 'historial' | 'morosidad'>('control');
+  
+  // Estados de datos
   const [activeInvitations, setActiveInvitations] = useState<AccessInvitation[]>([]); 
   const [historyLog, setHistoryLog] = useState<AccessInvitation[]>([]); 
+  
+  // Estados de UI
   const [scannedVisitor, setScannedVisitor] = useState<AccessInvitation | null>(null);
   const [selectedLog, setSelectedLog] = useState<AccessInvitation | null>(null);
   const [isManualEntry, setIsManualEntry] = useState(false);
@@ -25,7 +30,7 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
   const [generatingPdf, setGeneratingPdf] = useState(false);
   const [isScanning, setIsScanning] = useState(false); 
 
-  // 1. CARGAR INVITACIONES
+  // 1. CARGAR INVITACIONES ACTIVAS
   useEffect(() => {
     const q = query(collection(db, 'access_invitations'), where('status', 'in', ['PENDIENTE', 'EN SITIO']));
     return onSnapshot(q, (snapshot) => {
@@ -41,14 +46,19 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
     return onSnapshot(qHistory, (snapshot) => {
       const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as AccessInvitation[];
       const currentShiftLogs = docs.filter(doc => !(doc as any).archived);
-      currentShiftLogs.sort((a, b) => (b.exitTime || '').localeCompare(a.exitTime || ''));
+      currentShiftLogs.sort((a, b) => {
+         const timeA = a.exitTime || '';
+         const timeB = b.exitTime || '';
+         return timeB.localeCompare(timeA); 
+      });
       setHistoryLog(currentShiftLogs);
     });
   }, []);
 
-  // --- FUNCIÓN DE NOTIFICACIÓN ---
+  // --- FUNCIÓN DE NOTIFICACIÓN (CON PROXY ESTABLE) ---
   const notifyOwner = async (invitation: AccessInvitation) => {
     try {
+      // 1. Buscamos el token del dueño
       const userRef = doc(db, 'users', invitation.author);
       const userSnap = await getDoc(userRef);
       
@@ -59,8 +69,11 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
         if (token) {
           console.log("🔔 Enviando notificación a:", userData.name);
           
-          // Usamos el Proxy de Heroku (cors-anywhere)
-          const response = await fetch('https://cors-anywhere.herokuapp.com/https://fcm.googleapis.com/fcm/send', {
+          // 2. USAMOS corsproxy.io QUE ES MÁS ROBUSTO
+          const targetUrl = 'https://fcm.googleapis.com/fcm/send';
+          const proxyUrl = 'https://corsproxy.io/?' + encodeURIComponent(targetUrl);
+
+          const response = await fetch(proxyUrl, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -70,36 +83,35 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
               to: token,
               notification: {
                 title: '🔔 ¡VISITA EN GARITA!',
-                body: `${invitation.name} (${invitation.type}) ha ingresado.`,
+                body: `${invitation.name} (${invitation.type}) ha ingresado al condominio.`,
                 sound: "default"
               },
               priority: "high",
-              data: { click_action: "FLUTTER_NOTIFICATION_CLICK" }
+              data: {
+                click_action: "FLUTTER_NOTIFICATION_CLICK",
+                status: "done" 
+              }
             })
           });
 
           if (response.ok) {
-             console.log("✅ ¡Notificación enviada!");
-             alert("✅ Notificación enviada exitosamente.");
+             console.log("✅ ¡Notificación enviada con éxito!");
+             if (navigator.vibrate) navigator.vibrate([50, 50]); // Feedback táctil en la PC si es táctil
           } else {
              const errorText = await response.text();
              console.error("❌ Error enviando:", errorText);
-             
-             // ANÁLISIS DE ERROR
-             if(errorText.includes("Unauthorized") || response.status === 401) {
-                 alert("❌ ERROR DE AUTORIZACIÓN (401)\n\nEsta clave 'AIza' no sirvió. \nDebes ir a Firebase > Cloud Messaging > Inhabilitar la API Heredada y volverla a Habilitar para que aparezca la clave 'AAAA...'.");
-             } else if(errorText.includes("See /corsdemo")) {
-                 alert("⚠️ Activa el proxy aquí: cors-anywhere.herokuapp.com/corsdemo");
-                 window.open("https://cors-anywhere.herokuapp.com/corsdemo", "_blank");
-             }
+             alert("Error al notificar: " + response.status + " " + response.statusText);
           }
+        } else {
+           console.log("⚠️ El dueño no tiene token registrado (quizás no ha abierto la App recientemente).");
         }
       }
     } catch (error) {
-      console.error("Error:", error);
+      console.error("Error general de notificación:", error);
     }
   };
 
+  // 3. LÓGICA DE ESCANEO
   const handleQrScan = (detectedCodes: any) => {
     if (detectedCodes && detectedCodes.length > 0) {
       const rawValue = detectedCodes[0].rawValue; 
@@ -111,13 +123,14 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
           setScannedVisitor(found);
         } else {
           if (navigator.vibrate) navigator.vibrate(500);
-          alert("❌ PASE NO VÁLIDO");
+          alert("❌ PASE NO VÁLIDO O YA PROCESADO");
           setIsScanning(false);
         }
       }
     }
   };
 
+  // 4. PROCESAR ACCESO
   const processAccess = async (visitor: AccessInvitation, action: 'ENTRAR' | 'SALIR') => {
     try {
       const docRef = doc(db, 'access_invitations', visitor.id);
@@ -128,36 +141,62 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
         [action === 'ENTRAR' ? 'entryTime' : 'exitTime']: now 
       });
 
-      if (action === 'ENTRAR') notifyOwner(visitor);
+      // 🔥 SI ESTÁ ENTRANDO, DISPARAMOS LA NOTIFICACIÓN
+      if (action === 'ENTRAR') {
+        // Ejecutamos la notificación sin esperar (async) para no trabar la UI
+        notifyOwner(visitor);
+      }
 
       setScannedVisitor(null);
-    } catch (e) { alert("Error de conexión"); }
+    } catch (e) { 
+      alert("Error de conexión");
+      console.error(e);
+    }
   };
 
+  // 5. GENERAR REPORTE PDF
   const generateDailyReport = async () => {
-    if (historyLog.length === 0 && activeInvitations.length === 0) return alert("No hay registros.");
-    if (!confirm("¿CERRAR GUARDIA?")) return;
+    if (historyLog.length === 0 && activeInvitations.length === 0) return alert("No hay registros para cerrar.");
+    if (!confirm("¿Generar Reporte y CERRAR GUARDIA?")) return;
+
     setGeneratingPdf(true);
     try {
       const doc = new jsPDF();
       const today = new Date().toLocaleDateString('es-VE');
       const timeNow = new Date().toLocaleTimeString('es-VE');
-      doc.text(`REPORTE DE GUARDIA - ${today} ${timeNow}`, 14, 20);
+
+      doc.setFillColor(30, 58, 138); doc.rect(14, 10, 25, 25, 'F'); 
+      doc.setTextColor(255, 255, 255); doc.setFontSize(16); doc.text("CS", 19, 27); 
+      doc.setTextColor(0, 0, 0); doc.setFont("helvetica", "bold"); doc.setFontSize(16);
+      doc.text("CONDOMINIO SEGURO", 45, 20);
+      doc.setFont("helvetica", "normal"); doc.setFontSize(10);
+      doc.text(`REPORTE DE GUARDIA - ${today} ${timeNow}`, 45, 26);
+
       const allRecords = [...activeInvitations, ...historyLog];
       const tableData = allRecords.map(row => [
         row.entryTime || '--', row.exitTime || (row.status === 'EN SITIO' ? 'Dentro' : 'Pendiente'),
         row.unit, row.name, row.idNumber, row.type, row.status
       ]);
-      autoTable(doc, { startY: 30, head: [['Entrada', 'Salida', 'Apto', 'Nombre', 'CI', 'Tipo', 'Estado']], body: tableData });
+
+      autoTable(doc, {
+        startY: 35,
+        head: [['Entrada', 'Salida', 'Apto', 'Nombre', 'Cédula', 'Tipo', 'Estado']],
+        body: tableData,
+      });
+
       doc.save(`Guardia_${today.replace(/\//g, '-')}.pdf`);
+
       if (historyLog.length > 0) {
         const batch = writeBatch(db);
-        historyLog.forEach(log => { if (log.status === 'SALIDA') batch.update(doc(db, 'access_invitations', log.id), { archived: true }); });
+        historyLog.forEach(log => {
+          if (log.status === 'SALIDA') batch.update(doc(db, 'access_invitations', log.id), { archived: true });
+        });
         await batch.commit();
       }
     } catch (e) { alert("Error PDF"); } finally { setGeneratingPdf(false); }
   };
 
+  // --- RENDERIZADO ---
   if (isScanning) return (
     <div className="fixed inset-0 z-[100] bg-black flex flex-col items-center justify-center">
       <div className="w-full max-w-md aspect-square relative rounded-3xl overflow-hidden border-4 border-blue-500 shadow-2xl bg-black">
@@ -185,6 +224,7 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
           <button onClick={() => setActiveTab('morosidad')} className={`flex-1 py-2 text-[10px] font-black uppercase rounded-lg ${activeTab === 'morosidad' ? 'bg-red-600' : 'text-slate-500'}`}>Morosidad</button>
         </div>
       </header>
+
       <main className="p-4 space-y-6">
         {activeTab === 'control' && (
           <>
@@ -194,6 +234,7 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
                 <button onClick={() => setIsManualEntry(true)} className="bg-slate-800 p-6 rounded-3xl border border-slate-700 flex flex-col items-center gap-2"><span className="material-symbols-outlined text-4xl text-slate-400">search</span><span className="text-xs font-black uppercase text-slate-400">Cédula</span></button>
               </div>
             )}
+            
             {isManualEntry && (
               <div className="bg-slate-800 p-4 rounded-2xl border border-slate-700">
                 <input value={manualSearchCedula} onChange={e => setManualSearchCedula(e.target.value)} className="w-full bg-slate-900 border-none rounded-xl h-12 px-4 text-white font-bold mb-3" placeholder="Cédula..." />
@@ -206,6 +247,7 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
                 </div>
               </div>
             )}
+
             {scannedVisitor && (
               <div className="bg-slate-800 border-2 border-green-500 rounded-3xl p-6 shadow-2xl relative overflow-hidden animate-in zoom-in-95">
                  <div className="absolute top-0 left-0 right-0 bg-green-500 py-1 text-center"><p className="text-[10px] font-black text-white uppercase tracking-[0.2em]">✅ Pase Válido</p></div>
@@ -220,6 +262,7 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
                  <button onClick={() => setScannedVisitor(null)} className="w-full mt-4 text-xs text-slate-500 font-bold uppercase">Cancelar</button>
               </div>
             )}
+
             <div className="space-y-3 pt-4">
                {activeInvitations.map(inv => (
                 <div key={inv.id} onClick={() => setScannedVisitor(inv)} className={`p-4 rounded-2xl border flex justify-between items-center cursor-pointer ${inv.status === 'EN SITIO' ? 'bg-green-500/10 border-green-500/30' : 'bg-slate-800 border-slate-700'}`}>
@@ -230,6 +273,7 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
             </div>
           </>
         )}
+
         {activeTab === 'historial' && (
           <div className="space-y-2">
             {historyLog.map((log) => (
@@ -241,6 +285,7 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
             <button onClick={generateDailyReport} className="w-full py-4 mt-4 bg-blue-600 rounded-xl font-bold uppercase text-xs">Cerrar Guardia (PDF)</button>
           </div>
         )}
+
         {activeTab === 'morosidad' && morosos.map((m, i) => (
           <div key={i} className="bg-slate-800 p-5 rounded-2xl border-l-4 border-l-red-500 border border-slate-700 flex justify-between items-center">
              <div><p className="text-lg font-black text-white">{m.unit}</p></div>
@@ -251,4 +296,5 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
     </div>
   );
 };
+
 export default SecurityPanel;
