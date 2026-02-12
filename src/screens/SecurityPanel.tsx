@@ -1,10 +1,14 @@
 import React, { useState, useEffect } from 'react';
-import { AccessInvitation } from '../types'; // Asegúrate que este tipo exista o defínelo aquí si da error
+import { AccessInvitation } from '../types';
 import { db } from '../firebase';
-import { collection, query, where, onSnapshot, doc, updateDoc, limit, writeBatch } from 'firebase/firestore';
+// Agregamos getDoc para buscar el token del dueño
+import { collection, query, where, onSnapshot, doc, updateDoc, limit, writeBatch, getDoc } from 'firebase/firestore';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Scanner } from '@yudiel/react-qr-scanner'; 
+
+// ⚠️ PEGA AQUÍ TU LLAVE NUEVA QUE EMPIEZA POR AIza...
+const FIREBASE_SERVER_KEY = "AIzaSyAou-1wI-Qu3HEM8LxtN3TY_YJM5Hsp5M4"; 
 
 interface Props {
   setScreen: (s: string) => void;
@@ -26,18 +30,17 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
   const [generatingPdf, setGeneratingPdf] = useState(false);
   const [isScanning, setIsScanning] = useState(false); 
 
-  // 1. CARGAR INVITACIONES ACTIVAS (Pendientes y En Sitio)
+  // 1. CARGAR INVITACIONES ACTIVAS
   useEffect(() => {
     const q = query(collection(db, 'access_invitations'), where('status', 'in', ['PENDIENTE', 'EN SITIO']));
     return onSnapshot(q, (snapshot) => {
       const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as AccessInvitation[];
-      // Ordenar: Los que están "EN SITIO" primero
       docs.sort((a, b) => (a.status === 'EN SITIO' ? -1 : 1));
       setActiveInvitations(docs);
     });
   }, []);
 
-  // 2. CARGAR HISTORIAL (Salidas recientes)
+  // 2. CARGAR HISTORIAL
   useEffect(() => {
     const qHistory = query(collection(db, 'access_invitations'), where('status', '==', 'SALIDA'), limit(50));
     return onSnapshot(qHistory, (snapshot) => {
@@ -51,6 +54,54 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
       setHistoryLog(currentShiftLogs);
     });
   }, []);
+
+  // --- FUNCIÓN DE NOTIFICACIÓN (CON PROXY) ---
+  const notifyOwner = async (invitation: AccessInvitation) => {
+    try {
+      // 1. Buscamos el token del dueño
+      const userRef = doc(db, 'users', invitation.author);
+      const userSnap = await getDoc(userRef);
+      
+      if (userSnap.exists()) {
+        const userData = userSnap.data();
+        const token = userData.fcmToken;
+
+        if (token) {
+          console.log("🔔 Enviando notificación a:", userData.name);
+          
+          // 2. Enviamos usando ThingProxy para evitar bloqueo CORS
+          const response = await fetch('https://thingproxy.freeboard.io/fetch/https://fcm.googleapis.com/fcm/send', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `key=${FIREBASE_SERVER_KEY}`
+            },
+            body: JSON.stringify({
+              to: token,
+              notification: {
+                title: '🔔 Visita Llegando',
+                body: `${invitation.name} (${invitation.type}) ha ingresado al condominio.`
+              },
+              data: {
+                click_action: "FLUTTER_NOTIFICATION_CLICK"
+              }
+            })
+          });
+
+          if (response.ok) {
+             console.log("✅ ¡Notificación enviada con éxito!");
+          } else {
+             const errorText = await response.text();
+             console.error("❌ Error enviando:", errorText);
+          }
+        } else {
+          console.log("⚠️ El usuario no tiene token FCM activo (Quizás cerró sesión).");
+        }
+      }
+    } catch (error) {
+      console.error("Error general de notificación:", error);
+    }
+  };
 
   // 3. LÓGICA DE ESCANEO
   const handleQrScan = (detectedCodes: any) => {
@@ -71,7 +122,7 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
     }
   };
 
-  // 4. PROCESAR ACCESO (Solo actualiza DB)
+  // 4. PROCESAR ACCESO
   const processAccess = async (visitor: AccessInvitation, action: 'ENTRAR' | 'SALIR') => {
     try {
       const docRef = doc(db, 'access_invitations', visitor.id);
@@ -82,7 +133,11 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
         [action === 'ENTRAR' ? 'entryTime' : 'exitTime']: now 
       });
 
-      // Feedback visual simple
+      // 🔥 SI ESTÁ ENTRANDO, ENVIAR NOTIFICACIÓN
+      if (action === 'ENTRAR') {
+        notifyOwner(visitor);
+      }
+
       setScannedVisitor(null);
     } catch (e) { 
       alert("Error de conexión");
@@ -122,7 +177,6 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
 
       doc.save(`Guardia_${today.replace(/\//g, '-')}.pdf`);
 
-      // Archivar salidas
       if (historyLog.length > 0) {
         const batch = writeBatch(db);
         historyLog.forEach(log => {
