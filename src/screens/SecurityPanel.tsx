@@ -7,7 +7,7 @@ import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Scanner } from '@yudiel/react-qr-scanner'; 
 
-// ⚠️ PEGA AQUÍ TU LLAVE NUEVA QUE EMPIEZA POR AIza...
+// ⚠️ TU LLAVE DE SERVIDOR (La que creaste en Google Cloud)
 const FIREBASE_SERVER_KEY = "AIzaSyAou-1wI-Qu3HEM8LxtN3TY_YJM5Hsp5M4"; 
 
 interface Props {
@@ -55,7 +55,7 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
     });
   }, []);
 
-  // --- FUNCIÓN DE NOTIFICACIÓN (CON PROXY) ---
+  // --- FUNCIÓN DE NOTIFICACIÓN (USANDO CORS-ANYWHERE) ---
   const notifyOwner = async (invitation: AccessInvitation) => {
     try {
       // 1. Buscamos el token del dueño
@@ -69,8 +69,9 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
         if (token) {
           console.log("🔔 Enviando notificación a:", userData.name);
           
-          // 2. Enviamos usando ThingProxy para evitar bloqueo CORS
-          const response = await fetch('https://thingproxy.freeboard.io/fetch/https://fcm.googleapis.com/fcm/send', {
+          // 2. Enviamos usando el Proxy de Heroku (cors-anywhere)
+          // Esto evita el error de CORS que bloquea el navegador
+          const response = await fetch('https://cors-anywhere.herokuapp.com/https://fcm.googleapis.com/fcm/send', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -93,9 +94,15 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
           } else {
              const errorText = await response.text();
              console.error("❌ Error enviando:", errorText);
+             
+             // Alerta si olvidaste activar el proxy
+             if(errorText.includes("See /corsdemo")) {
+                 alert("⚠️ ERROR PROXY: Debes activar el servidor temporalmente.\nAbre: cors-anywhere.herokuapp.com/corsdemo");
+                 window.open("https://cors-anywhere.herokuapp.com/corsdemo", "_blank");
+             }
           }
         } else {
-          console.log("⚠️ El usuario no tiene token FCM activo (Quizás cerró sesión).");
+          console.log("⚠️ El usuario no tiene token FCM activo.");
         }
       }
     } catch (error) {
@@ -133,7 +140,7 @@ const SecurityPanel: React.FC<Props> = ({ setScreen, onLogout }) => {
         [action === 'ENTRAR' ? 'entryTime' : 'exitTime']: now 
       });
 
-      // 🔥 SI ESTÁ ENTRANDO, ENVIAR NOTIFICACIÓN
+      // 🔥 SI ESTÁ ENTRANDO, DISPARAMOS LA NOTIFICACIÓN
       if (action === 'ENTRAR') {
         notifyOwner(visitor);
       }
