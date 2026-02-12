@@ -5,12 +5,12 @@ importScripts('https://www.gstatic.com/firebasejs/9.0.0/firebase-messaging-compa
 // PEGA AQUÍ LA MISMA CONFIGURACIÓN QUE TIENES EN SRC/FIREBASE.TS
 // (Pero sin "export const", solo el objeto plano)
 const firebaseConfig = {
-  apiKey: "TU_API_KEY_AQUI",
-  authDomain: "TU_PROYECTO.firebaseapp.com",
-  projectId: "TU_PROJECT_ID",
-  storageBucket: "TU_BUCKET",
-  messagingSenderId: "TU_SENDER_ID",
-  appId: "TU_APP_ID"
+    apiKey: "AIzaSyCgqeJEq40NtwIUzEcClVw9LOiq66F-up8",
+    authDomain: "serviciosph-panama.firebaseapp.com",
+    projectId: "serviciosph-panama",
+    storageBucket: "serviciosph-panama.firebasestorage.app",
+    messagingSenderId: "96060125590",
+    appId: "1:96060125590:web:ad58104f3c1929ca646db7"
 };
 
 firebase.initializeApp(firebaseConfig);
