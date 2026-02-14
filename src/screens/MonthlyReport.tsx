@@ -1,197 +1,200 @@
-
-import React, { useState, useRef } from 'react';
-import { ExpenseItem, IncomeItem } from '../types';
+import React, { useState, useEffect } from 'react';
+import { db } from '../firebase';
+import { collection, query, where, getDocs, addDoc, Timestamp, orderBy } from 'firebase/firestore';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 interface Props {
-  setScreen: (s: string) => void;
+  setScreen: (screen: string) => void;
 }
 
 const MonthlyReport: React.FC<Props> = ({ setScreen }) => {
-  const [activeTab, setActiveTab] = useState<'ingresos' | 'egresos'>('ingresos');
-  const [isAddingExpense, setIsAddingExpense] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [currentMonth, setCurrentMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
+  const [income, setIncome] = useState<any[]>([]);
+  const [expenses, setExpenses] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
   
-  const [incomeList] = useState<IncomeItem[]>([
-    { id: 'i1', source: 'Propiedad', description: 'Pago Apto 101 - J. Pérez', amount: 45.00, date: '2023-11-01', unit: '101' },
-    { id: 'i2', source: 'Local', description: 'Alquiler Local #1 (Farmacia)', amount: 450.00, date: '2023-11-05' },
-    { id: 'i3', source: 'Caney', description: 'Reserva Caney - Apto 302', amount: 25.00, date: '2023-11-08' },
-    { id: 'i4', source: 'Local', description: 'Alquiler Local #4 (Mini Market)', amount: 320.00, date: '2023-11-10' },
-    { id: 'i5', source: 'Propiedad', description: 'Pago Apto 205 - C. García', amount: 45.00, date: '2023-11-12', unit: '205' },
-  ]);
+  // Para registrar nuevo gasto
+  const [showExpenseForm, setShowExpenseForm] = useState(false);
+  const [newExpense, setNewExpense] = useState({ desc: '', amount: '' });
 
-  const [expensesList, setExpensesList] = useState<ExpenseItem[]>([
-    { id: 'e1', name: 'Reparación de Portón Eléctrico', amount: 120.00, invoicePhoto: 'https://i.postimg.cc/G2dCR0gq/image.png' },
-    { id: 'e2', name: 'Compra de Bombillos Pasillo', amount: 45.50, invoicePhoto: 'https://i.postimg.cc/G2dCR0gq/image.png' }
-  ]);
+  // 1. CARGAR DATA (Ingresos por Recibos Pagados y Gastos Registrados)
+  const fetchData = async () => {
+    setLoading(true);
+    try {
+      // A) INGRESOS: Buscar recibos PAGADOS del mes seleccionado
+      // Nota: En un caso real, filtraríamos por fecha exacta. Aquí traigo todos para el demo.
+      const qIncome = query(collection(db, 'receipts'), where('status', '==', 'PAGADO'));
+      const snapIncome = await getDocs(qIncome);
+      const incomeData = snapIncome.docs
+        .map(d => ({...d.data(), type: 'INGRESO'}))
+        .filter((d: any) => d.period === currentMonth); // Filtrado manual simple
+      setIncome(incomeData);
 
-  const [newExpense, setNewExpense] = useState({ name: '', amount: '', photo: null as string | null });
+      // B) EGRESOS: Buscar gastos registrados
+      const qExpenses = query(collection(db, 'expenses'), orderBy('createdAt', 'desc'));
+      const snapExpenses = await getDocs(qExpenses);
+      const expenseData = snapExpenses.docs
+        .map(d => ({...d.data(), type: 'EGRESO'}))
+        .filter((d: any) => d.date?.startsWith(currentMonth));
+      setExpenses(expenseData);
 
-  const handleAddExpense = () => {
-    if (!newExpense.name || !newExpense.amount || !newExpense.photo) {
-      alert("Por favor complete todos los datos y cargue el soporte fotográfico.");
-      return;
-    }
-    const item: ExpenseItem = {
-      id: Date.now().toString(),
-      name: newExpense.name,
-      amount: parseFloat(newExpense.amount),
-      invoicePhoto: newExpense.photo
-    };
-    setExpensesList([item, ...expensesList]);
-    setIsAddingExpense(false);
-    setNewExpense({ name: '', amount: '', photo: null });
+    } catch (e) { console.error(e); }
+    setLoading(false);
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => setNewExpense({ ...newExpense, photo: reader.result as string });
-      reader.readAsDataURL(file);
-    }
+  useEffect(() => { fetchData(); }, [currentMonth]);
+
+  // 2. CALCULAR TOTALES
+  const totalIncome = income.reduce((sum, item) => sum + (item.totalAmount || 0), 0);
+  const totalExpenses = expenses.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+  const balance = totalIncome - totalExpenses;
+
+  // 3. REGISTRAR UN GASTO (Para que aparezca en el reporte)
+  const handleAddExpense = async () => {
+    if (!newExpense.desc || !newExpense.amount) return alert("Llena los datos");
+    await addDoc(collection(db, 'expenses'), {
+        description: newExpense.desc,
+        amount: Number(newExpense.amount),
+        date: currentMonth + '-15', // Fecha simulada en el mes
+        createdAt: Timestamp.now()
+    });
+    setNewExpense({ desc: '', amount: '' });
+    setShowExpenseForm(false);
+    fetchData(); // Recargar
   };
 
-  const totalIncome = incomeList.reduce((acc, curr) => acc + curr.amount, 0);
-  const totalExpenses = expensesList.reduce((acc, curr) => acc + curr.amount, 0);
+  // 4. GENERAR PDF
+  const printReport = () => {
+    const doc = new jsPDF();
+    
+    // Encabezado
+    doc.setFillColor(30, 58, 138); doc.rect(0, 0, 210, 30, 'F');
+    doc.setTextColor(255, 255, 255); doc.setFontSize(18); doc.text("BALANCE CONTABLE MENSUAL", 105, 12, { align: "center" });
+    doc.setFontSize(12); doc.text(`Periodo: ${currentMonth}`, 105, 20, { align: "center" });
+
+    // Resumen
+    doc.setTextColor(0,0,0);
+    doc.text(`INGRESOS TOTALES: $${totalIncome.toFixed(2)}`, 14, 40);
+    doc.text(`EGRESOS TOTALES:   $${totalExpenses.toFixed(2)}`, 14, 46);
+    doc.setFont("helvetica", "bold");
+    doc.text(`BALANCE NETO:      $${balance.toFixed(2)}`, 14, 54);
+
+    // Tabla Ingresos
+    doc.text("DETALLE DE INGRESOS (Cobranza)", 14, 65);
+    autoTable(doc, {
+        startY: 68,
+        head: [['Unidad', 'Concepto', 'Monto']],
+        body: income.map(i => [i.unit, 'Pago Recibo', `$${i.totalAmount}`]),
+        theme: 'grid', styles: { fontSize: 8 }
+    });
+
+    // Tabla Egresos
+    const finalY = (doc as any).lastAutoTable.finalY + 10;
+    doc.text("DETALLE DE GASTOS OPERATIVOS", 14, finalY);
+    autoTable(doc, {
+        startY: finalY + 3,
+        head: [['Descripción', 'Monto']],
+        body: expenses.map(e => [e.description, `$${e.amount}`]),
+        theme: 'striped', styles: { fontSize: 8 }, headStyles: { fillColor: [200, 0, 0] }
+    });
+
+    doc.save(`Balance_${currentMonth}.pdf`);
+  };
 
   return (
-    <div className="flex flex-col min-h-full pb-20 bg-background-light dark:bg-background-dark">
-      <header className="sticky top-0 z-50 bg-slate-900 text-white p-4 border-b border-white/10">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-3">
-            <button onClick={() => setScreen('dashboard')} className="size-10 flex items-center justify-center rounded-full bg-white/10">
-              <span className="material-symbols-outlined">arrow_back_ios_new</span>
+    <div className="min-h-screen bg-slate-900 text-white p-6 pb-20">
+      <div className="flex items-center gap-4 mb-6">
+        <button onClick={() => setScreen('dashboard')} className="p-2 rounded-full bg-slate-800"><span className="material-symbols-outlined">arrow_back</span></button>
+        <h1 className="text-xl font-black uppercase text-blue-400">Finanzas</h1>
+      </div>
+
+      {/* SELECTOR MES */}
+      <div className="bg-slate-800 p-4 rounded-xl flex items-center justify-between mb-6 border border-slate-700">
+        <span className="font-bold text-sm text-slate-400">Mes a Consultar:</span>
+        <input 
+            type="month" 
+            value={currentMonth} 
+            onChange={e => setCurrentMonth(e.target.value)}
+            className="bg-slate-900 text-white font-bold p-2 rounded-lg border border-slate-600"
+        />
+      </div>
+
+      {/* TARJETAS RESUMEN */}
+      <div className="grid grid-cols-3 gap-3 mb-6">
+        <div className="bg-green-500/10 p-4 rounded-2xl border border-green-500/30 text-center">
+            <p className="text-[10px] uppercase font-bold text-green-400">Ingresos</p>
+            <p className="text-xl font-black text-white">${totalIncome}</p>
+        </div>
+        <div className="bg-red-500/10 p-4 rounded-2xl border border-red-500/30 text-center">
+            <p className="text-[10px] uppercase font-bold text-red-400">Egresos</p>
+            <p className="text-xl font-black text-white">${totalExpenses}</p>
+        </div>
+        <div className="bg-slate-700/50 p-4 rounded-2xl border border-slate-600 text-center">
+            <p className="text-[10px] uppercase font-bold text-blue-400">Balance</p>
+            <p className={`text-xl font-black ${balance >= 0 ? 'text-blue-300' : 'text-red-400'}`}>${balance}</p>
+        </div>
+      </div>
+
+      {/* LISTA DE MOVIMIENTOS */}
+      <div className="space-y-4">
+        <div className="flex justify-between items-center">
+            <h3 className="font-bold text-sm uppercase">Movimientos del Mes</h3>
+            <button onClick={() => setShowExpenseForm(true)} className="text-xs bg-red-600 hover:bg-red-500 px-3 py-1 rounded-lg font-bold flex items-center gap-1">
+                <span className="material-symbols-outlined text-sm">add</span> Registrar Gasto
             </button>
-            <h2 className="text-lg font-black tracking-tight">Caja Noviembre 2023</h2>
-          </div>
-          <div className="text-right">
-            <p className="text-[9px] font-black uppercase text-white/40">Balance Neto</p>
-            <p className="text-xl font-black text-emerald-400">${(totalIncome - totalExpenses).toFixed(2)}</p>
-          </div>
         </div>
-        
-        <div className="flex bg-white/5 p-1 rounded-xl">
-          <button onClick={() => setActiveTab('ingresos')} className={`flex-1 py-2 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all ${activeTab === 'ingresos' ? 'bg-emerald-500 text-white shadow-lg' : 'text-white/40'}`}>Ingresos Totales</button>
-          <button onClick={() => setActiveTab('egresos')} className={`flex-1 py-2 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all ${activeTab === 'egresos' ? 'bg-rose-500 text-white shadow-lg' : 'text-white/40'}`}>Egresos Totales</button>
-        </div>
-      </header>
 
-      <main className="p-4 space-y-6">
-        {activeTab === 'ingresos' ? (
-          <section className="space-y-6 animate-in fade-in slide-in-from-left-4">
-             {/* Resumen de Fuentes */}
-             <div className="grid grid-cols-3 gap-2">
-                {[
-                  { label: 'Aptos', val: incomeList.filter(i => i.source === 'Propiedad').reduce((a,c)=>a+c.amount,0), color: 'text-primary' },
-                  { label: 'Locales', val: incomeList.filter(i => i.source === 'Local').reduce((a,c)=>a+c.amount,0), color: 'text-purple-500' },
-                  { label: 'Caney', val: incomeList.filter(i => i.source === 'Caney').reduce((a,c)=>a+c.amount,0), color: 'text-amber-500' }
-                ].map((cat, i) => (
-                  <div key={i} className="bg-white dark:bg-slate-800 p-3 rounded-2xl border border-slate-200 dark:border-slate-800 text-center shadow-sm">
-                    <p className="text-[8px] font-black uppercase text-slate-400 mb-1">{cat.label}</p>
-                    <p className={`text-sm font-black ${cat.color}`}>${cat.val.toFixed(0)}</p>
-                  </div>
-                ))}
-             </div>
-
-             <div className="space-y-2">
-                <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 px-1">Listado de Ingresos</h3>
-                {incomeList.map(income => (
-                  <div key={income.id} className="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 flex justify-between items-center shadow-sm">
-                     <div className="flex items-center gap-3">
-                        <div className={`size-10 rounded-xl flex items-center justify-center ${income.source === 'Local' ? 'bg-purple-500/10 text-purple-500' : income.source === 'Caney' ? 'bg-amber-500/10 text-amber-500' : 'bg-primary/10 text-primary'}`}>
-                           <span className="material-symbols-outlined">{income.source === 'Local' ? 'store' : income.source === 'Caney' ? 'deck' : 'person'}</span>
-                        </div>
+        {loading ? <p className="text-center text-slate-500">Calculando...</p> : (
+            <div className="bg-slate-800 rounded-xl overflow-hidden border border-slate-700">
+                {/* COMBINAMOS Y ORDENAMOS PARA MOSTRAR TODO JUNTO */}
+                {[...income, ...expenses].map((item, i) => (
+                    <div key={i} className="flex justify-between p-4 border-b border-slate-700 last:border-0">
                         <div>
-                           <p className="text-sm font-black leading-none truncate max-w-[180px]">{income.description}</p>
-                           <p className="text-[9px] font-bold text-slate-500 uppercase mt-1.5">{income.date} • {income.source}</p>
+                            <p className="font-bold text-sm text-white">{item.type === 'INGRESO' ? `Pago Apto ${item.unit}` : item.description}</p>
+                            <p className="text-[10px] text-slate-400 uppercase">{item.type}</p>
                         </div>
-                     </div>
-                     <p className="text-sm font-black text-emerald-500">+${income.amount.toFixed(2)}</p>
-                  </div>
+                        <span className={`font-black ${item.type === 'INGRESO' ? 'text-green-400' : 'text-red-400'}`}>
+                            {item.type === 'INGRESO' ? '+' : '-'}${item.amount || item.totalAmount}
+                        </span>
+                    </div>
                 ))}
-             </div>
-          </section>
-        ) : (
-          <section className="space-y-6 animate-in fade-in slide-in-from-right-4">
-            {!isAddingExpense ? (
-              <button 
-                onClick={() => setIsAddingExpense(true)}
-                className="w-full bg-slate-900 dark:bg-slate-800 text-white h-14 rounded-2xl font-black uppercase tracking-widest text-xs flex items-center justify-center gap-2 shadow-xl"
-              >
-                <span className="material-symbols-outlined">add_photo_alternate</span>
-                Registrar Nuevo Egreso
-              </button>
-            ) : (
-              <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl border-2 border-rose-500 shadow-2xl space-y-4 animate-in zoom-in-95">
-                <h3 className="text-sm font-black uppercase tracking-widest text-rose-500">Nuevo Gasto Común</h3>
-                <div className="space-y-3">
-                  <input 
-                    placeholder="Descripción (Ej: Bombillos)" 
-                    value={newExpense.name} 
-                    onChange={e => setNewExpense({...newExpense, name: e.target.value})}
-                    className="w-full bg-slate-100 dark:bg-slate-900 border-none rounded-xl h-12 px-4 text-sm font-bold" 
-                  />
-                  <div className="relative">
-                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold">$</span>
-                    <input 
-                      type="number" 
-                      placeholder="Monto" 
-                      value={newExpense.amount} 
-                      onChange={e => setNewExpense({...newExpense, amount: e.target.value})}
-                      className="w-full bg-slate-100 dark:bg-slate-900 border-none rounded-xl h-12 pl-8 pr-4 text-sm font-bold" 
-                    />
-                  </div>
-                  
-                  <div className="flex flex-col gap-2">
-                    <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept="image/*" />
-                    <button 
-                      onClick={() => fileInputRef.current?.click()}
-                      className={`w-full h-24 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center transition-all ${newExpense.photo ? 'border-emerald-500 bg-emerald-500/5 text-emerald-600' : 'border-slate-300 dark:border-slate-700 text-slate-400'}`}
-                    >
-                      {newExpense.photo ? (
-                        <>
-                          <span className="material-symbols-outlined text-3xl">check_circle</span>
-                          <span className="text-[10px] font-black uppercase tracking-widest mt-1">Soporte Cargado</span>
-                        </>
-                      ) : (
-                        <>
-                          <span className="material-symbols-outlined text-3xl">add_a_photo</span>
-                          <span className="text-[10px] font-black uppercase tracking-widest mt-1">Adjuntar Factura</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
-                <div className="flex gap-2">
-                  <button onClick={() => setIsAddingExpense(false)} className="flex-1 h-12 bg-slate-100 dark:bg-slate-900 rounded-xl font-bold text-xs uppercase">Cerrar</button>
-                  <button onClick={handleAddExpense} className="flex-[2] h-12 bg-rose-500 text-white rounded-xl font-black text-xs uppercase">Guardar Egreso</button>
-                </div>
-              </div>
-            )}
-
-            <div className="space-y-2">
-              <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 px-1">Egresos del Mes</h3>
-              {expensesList.map(ex => (
-                <div key={ex.id} className="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 flex justify-between items-center shadow-sm group">
-                  <div className="flex items-center gap-3">
-                    <div className="size-10 rounded-lg overflow-hidden border border-slate-200 bg-slate-100 relative cursor-pointer">
-                      <img src={ex.invoicePhoto} className="w-full h-full object-cover" />
-                      <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                        <span className="material-symbols-outlined text-white text-sm">zoom_in</span>
-                      </div>
-                    </div>
-                    <div>
-                      <p className="text-sm font-black leading-none">{ex.name}</p>
-                      <p className="text-[9px] font-bold text-slate-500 uppercase mt-1">Factura verificada</p>
-                    </div>
-                  </div>
-                  <p className="text-sm font-black text-rose-500">-${ex.amount.toFixed(2)}</p>
-                </div>
-              ))}
+                {[...income, ...expenses].length === 0 && <p className="p-4 text-center text-sm text-slate-500">Sin movimientos este mes.</p>}
             </div>
-          </section>
         )}
-      </main>
+      </div>
+
+      {/* BOTÓN IMPRIMIR */}
+      <button onClick={printReport} className="fixed bottom-4 right-4 bg-blue-600 text-white p-4 rounded-full shadow-2xl flex items-center gap-2 font-bold animate-bounce-slow">
+        <span className="material-symbols-outlined">print</span>
+        Imprimir PDF
+      </button>
+
+      {/* MODAL NUEVO GASTO */}
+      {showExpenseForm && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+            <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-sm border border-slate-700">
+                <h3 className="text-lg font-black text-white mb-4">Registrar Egreso</h3>
+                <input 
+                    placeholder="Descripción (ej. Compra Bombillos)" 
+                    className="w-full bg-slate-900 border border-slate-600 rounded-lg p-3 mb-3 text-white"
+                    value={newExpense.desc}
+                    onChange={e => setNewExpense({...newExpense, desc: e.target.value})}
+                />
+                <input 
+                    type="number" 
+                    placeholder="Monto ($)" 
+                    className="w-full bg-slate-900 border border-slate-600 rounded-lg p-3 mb-4 text-white"
+                    value={newExpense.amount}
+                    onChange={e => setNewExpense({...newExpense, amount: e.target.value})}
+                />
+                <div className="flex gap-2">
+                    <button onClick={() => setShowExpenseForm(false)} className="flex-1 bg-slate-700 py-3 rounded-lg font-bold text-slate-300">Cancelar</button>
+                    <button onClick={handleAddExpense} className="flex-1 bg-red-600 py-3 rounded-lg font-bold text-white">Guardar</button>
+                </div>
+            </div>
+        </div>
+      )}
     </div>
   );
 };

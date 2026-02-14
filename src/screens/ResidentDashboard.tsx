@@ -1,4 +1,3 @@
-
 import React from 'react';
 import { UserProfile } from '../types';
 
@@ -87,12 +86,13 @@ const ResidentDashboard: React.FC<Props> = ({ setScreen, profile, onLogout }) =>
               { id: 'announcements', label: 'Anuncios', sub: 'Asambleas y notas', icon: 'campaign', color: 'bg-amber-500/10 text-amber-500' },
               { id: 'surveys', label: 'Encuestas', sub: 'Votaciones activas', icon: 'poll', color: 'bg-primary/10 text-primary' },
               { id: 'report-payment', label: 'Reportar Pago', sub: 'Registrar transf.', icon: 'payments', color: 'bg-emerald-500/10 text-emerald-500' },
-              { id: 'access-control', label: 'Generar QR', sub: 'Acceso invitados', icon: 'qr_code_2', color: 'bg-purple-500/10 text-purple-500' }
-            ].map(action => (
+              { id: 'access-control', label: 'Generar QR', sub: 'Acceso invitados', icon: 'qr_code_2', color: 'bg-purple-500/10 text-purple-500' },
+              { id: 'caney-reservation', label: 'Reservar Caney', sub: 'Fiestas y eventos', icon: 'celebration', color: 'bg-pink-500/10 text-pink-500' }
+            ].map((action, index) => (
               <button 
                 key={action.id}
                 onClick={() => setScreen(action.id)}
-                className="flex flex-col items-start gap-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-800/50 p-4 transition-all active:bg-slate-100 dark:active:bg-slate-800 hover:border-primary/40 group"
+                className={`flex flex-col items-start gap-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-800/50 p-4 transition-all active:bg-slate-100 dark:active:bg-slate-800 hover:border-primary/40 group ${index === 4 ? 'col-span-2' : ''}`} // El caney ocupa todo el ancho si es impar
               >
                 <div className={`flex size-10 items-center justify-center rounded-lg ${action.color} group-hover:scale-110 transition-transform`}>
                   <span className="material-symbols-outlined">{action.icon}</span>

@@ -1,4 +1,3 @@
-
 import React from 'react';
 import { UserProfile } from '../types';
 
@@ -49,15 +48,28 @@ const AdminDashboard: React.FC<Props> = ({ setScreen, profile, onLogout }) => {
           <span className="material-symbols-outlined absolute -right-4 -bottom-4 text-9xl opacity-5">account_balance</span>
         </div>
 
-        <button onClick={() => setScreen('create-receipt')} className="w-full flex items-center justify-between p-6 bg-white dark:bg-slate-800 rounded-3xl border border-slate-200 dark:border-slate-800">
-           <div className="flex items-center gap-4">
-              <div className="size-10 bg-amber-500/10 text-amber-500 rounded-xl flex items-center justify-center">
-                <span className="material-symbols-outlined">add_notes</span>
-              </div>
-              <span className="text-sm font-black uppercase">Armar Nuevo Recibo</span>
-           </div>
-           <span className="material-symbols-outlined text-slate-300">chevron_right</span>
-        </button>
+        <div className="space-y-4">
+          <button onClick={() => setScreen('create-receipt')} className="w-full flex items-center justify-between p-6 bg-white dark:bg-slate-800 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm transition-all active:scale-95">
+             <div className="flex items-center gap-4">
+                <div className="size-10 bg-amber-500/10 text-amber-500 rounded-xl flex items-center justify-center">
+                  <span className="material-symbols-outlined">add_notes</span>
+                </div>
+                <span className="text-sm font-black uppercase">Armar Nuevo Recibo</span>
+             </div>
+             <span className="material-symbols-outlined text-slate-300">chevron_right</span>
+          </button>
+
+          {/* NUEVO BOTÓN: HISTORIAL DE RECIBOS */}
+          <button onClick={() => setScreen('receipt-history-admin')} className="w-full flex items-center justify-between p-6 bg-white dark:bg-slate-800 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm transition-all active:scale-95">
+             <div className="flex items-center gap-4">
+                <div className="size-10 bg-cyan-500/10 text-cyan-500 rounded-xl flex items-center justify-center">
+                  <span className="material-symbols-outlined">history_edu</span>
+                </div>
+                <span className="text-sm font-black uppercase">Historial Recibos</span>
+             </div>
+             <span className="material-symbols-outlined text-slate-300">chevron_right</span>
+          </button>
+        </div>
       </main>
     </div>
   );

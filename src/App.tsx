@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-// TUS PANTALLAS (Asegúrate que coincidan con tus archivos)
+// TUS PANTALLAS
 import Login from './screens/Login';
 import Register from './screens/Register';
 import ResidentDashboard from './screens/ResidentDashboard';
 import AdminDashboard from './screens/AdminDashboard';
 import SecurityPanel from './screens/SecurityPanel';
-// ... otros imports ...
+import CaneyReservation from './screens/CaneyReservation'; 
+import ReceiptHistoryAdmin from './screens/ReceiptHistoryAdmin'; // <--- NUEVO IMPORT
 import UnitManagement from './screens/UnitManagement';
 import CreateReceipt from './screens/CreateReceipt';
 import RateHistory from './screens/RateHistory';
@@ -138,7 +139,15 @@ const App: React.FC = () => {
         if (role === UserRole.ADMIN) return <AdminDashboard setScreen={setScreen} profile={userProfile} onLogout={handleLogout} />;
         if (role === UserRole.SECURITY) return <SecurityPanel setScreen={setScreen} onLogout={handleLogout} />;
         return <ResidentDashboard setScreen={setScreen} profile={userProfile} onLogout={handleLogout} />;
-      // ... RESTO DE TUS PANTALLAS ...
+      
+      // NUEVA PANTALLA DE RESERVA
+      case 'caney-reservation': 
+        return <CaneyReservation setScreen={setScreen} userProfile={userProfile} />;
+
+      // NUEVA PANTALLA DE HISTORIAL (ADMIN)
+      case 'receipt-history-admin': 
+        return <ReceiptHistoryAdmin setScreen={setScreen} />;
+
       case 'profile-edit': return <ProfileEdit setScreen={setScreen} profile={userProfile} onLogout={handleLogout} />;
       case 'announcements': return <Announcements setScreen={setScreen} role={role} />;
       case 'rate-history': return <RateHistory setScreen={setScreen} />;
